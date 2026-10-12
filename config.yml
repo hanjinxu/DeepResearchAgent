@@ -50,6 +50,70 @@ stages:
         topic: general
         include_raw_content: true
         timeout_seconds: 300
+
+    # ===== 事件记忆层（判重 + 增量进展追踪 + 归档回写）=====
+    # 关闭方式：enabled: false，主链路会退回"每次从零调研"。
+    event_memory:
+      enabled: true
+      # 判重 / delta 抽取用的模型角色（见下方 roles.event_judge）
+      judge_role: event_judge
+
+      # 命中历史事件后的增量模式：
+      #   full（默认，质量优先）
+      #     仍走完整 supervisor 主研究循环，但研究简报收敛为"只补最新进展"，
+      #     明确禁止重搜已知时间线节点 → 省的是「研究范围」，报告仍经过去噪/红队/评分迭代。
+      #   fast（成本优先）
+      #     跳过整个主研究循环（不拆子 query、不起并行子 agent、不去噪、不走红队与评分），
+      #     直接用「历史基线 + 本次增量检索资料」生成更新版报告。
+      #     代价：本次报告不经过对抗审查，质量保障弱于 full；适合"只想知道有无新进展"的日常巡检。
+      increment_mode: full
+
+      store:
+        # backend: elasticsearch | jsonl
+        # 选 elasticsearch：连接失败会**自动降级**为 jsonl 并告警，不会中断研究流程
+        backend: jsonl
+        jsonl_path: ./data/event_memory/events.jsonl
+        archive_keep: 5            # content_archive 里保留的历史报告份数
+        elasticsearch:
+          hosts: ["http://localhost:9200"]
+          index: deepresearch_events
+          username: ""
+          password: ""
+          timeout: 30
+
+      embedding:
+        # provider: hashing_ngram（零依赖，字符 2/3-gram hashing，默认）
+        #         | openai_compatible（指向 vLLM 部署的 Qwen3-Embedding 等）
+        # 注意：DeepSeek 官方 API 不提供 embedding 接口，不能沿用 LLM 的 backend
+        provider: hashing_ngram
+        dim: 256
+        openai_compatible:
+          base_url: http://localhost:8002/v1
+          api_key: local-vllm
+          model: Qwen3-Embedding-0.6B
+          dim: 0                   # 0 = 首次调用时自动探测
+
+      dedup:
+        l2_top_k: 5                # L2 向量召回的候选数
+        # l2_floor：L2 相似度下限。留空/注释掉 = 按 embedder 类型自动取值
+        #   hashing_ngram      → 0.05（实测：同事件 0.10~0.35，不同事件 -0.07~0.07，
+        #                               两者几乎贴在一起，阈值只能用来过滤"明显无关"，判定必须靠 L3）
+        #   openai_compatible  → 0.55（真 embedding 的量纲，同事件通常 0.8+）
+        # ⚠️ 不要凭直觉调大到 0.15 以上，否则会连正确的历史事件一起过滤掉，L2 永不触发。
+        # l2_floor: 0.05
+        l3_enabled: true           # 是否启用 L3 LLM 判定
+        candidate_limit: 2000      # 参与 L1 比对 / L2 召回的历史记录上限
+        since_days: 0              # >0 时只看最近 N 天的历史事件
+
+      delta:
+        # 「时间 + 关键词」增量检索的关键词表（留空则用 prompts/event_memory.py 的默认表）
+        keywords: ["回应", "声明", "辟谣", "通报", "处罚", "整改", "起诉", "反转", "否认", "致歉", "热搜"]
+        keywords_per_query: 3      # 每条检索式塞几个关键词（11 个词 / 3 ≈ 4 条 + 2 条时间锚定 = 6 条，正好填满预算）
+        lookback_days: 7
+        max_queries: 6
+        max_results: 3
+        topic: news                # 增量追踪用 news 更贴合"最新进展"
+
     roles:
       # 当前全部走 DeepSeek 官方 API（本地 vLLM 未部署）
       # 切回本地 vLLM：backend 改回 qwen_general / qwen_redteam，
@@ -92,3 +156,9 @@ stages:
         backend: deepseek
         handle: deepseek-chat
         timeout_seconds: 600
+      # 事件记忆层：判重 L3 判定 + 事件键抽取 + delta 抽取
+      event_judge:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+        temperature: 0

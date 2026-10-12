@@ -15,3 +15,9 @@ ipykernel>=7.1.0
 tavily-python>=0.7.17
 PyYAML>=6.0.3
 build>=1.2.1
+
+# ===== 事件记忆层（可选依赖）=====
+# 记忆层默认走 hashing-ngram 向量 + 本地 JSONL 存储，**不需要任何额外依赖**。
+# 只有要把记忆库切到 Elasticsearch 时才需要装（config.yml → event_memory.store.backend: elasticsearch）：
+# elasticsearch>=8.0.0
+# 只有要用真 embedding（如本地 vLLM 部署的 Qwen3-Embedding）时才需要，本模块用 stdlib urllib 实现，无需额外包。

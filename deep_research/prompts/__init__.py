@@ -23,3 +23,9 @@ from deep_research.prompts.legal_audit_report import (
     LEGAL_AUDIT_KEYWORDS,
     is_legal_audit_query,
 ) 
+from deep_research.prompts.event_memory import (
+    EVENT_KEY_EXTRACT_PROMPT,
+    EVENT_DEDUP_JUDGE_PROMPT,
+    DELTA_EXTRACT_PROMPT,
+    DELTA_TRACK_KEYWORDS,
+) 

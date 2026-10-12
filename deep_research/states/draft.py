@@ -35,6 +35,16 @@ class AgentState(MessagesState):
     draft_report: str                                                       # 研究报告草稿
     final_report: str                                                       # 最终格式化的研究报告
 
+    # ===== 事件记忆层字段（由 event_recall / event_memory_commit 节点读写）=====
+    event_id: str = ""                            # 事件唯一 ID（subject|issue），判重命中或新抽取
+    is_repeat_event: bool = False                 # 是否为已建档事件的增量追踪（True 时不再重跑历史节点）
+    event_increment_context: str = ""             # 注入 write_research_brief 的「增量追踪」指令块
+    event_memory_block: str = ""                  # 注入 write_draft_report 的历史基线（1.2 时间线 / 2.2 传闻状态机）
+    event_history: dict = {}                      # 命中历史事件时的归档快照（EventRecord.model_dump()）
+    delta_updates: dict = {}                      # 本次增量进展（DeltaUpdate.model_dump()）
+    skip_research_loop: bool = False              # True 时跳过 supervisor 主研究循环（增量 fast 模式）
+    memory_meta: dict = {}                        # 记忆层运行元信息（命中层级/存储后端/delta 统计），供日志与看板使用
+
 
 # ===== STRUCTURED OUTPUT SCHEMAS =====
 

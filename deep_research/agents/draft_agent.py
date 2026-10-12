@@ -53,7 +53,16 @@ def write_research_brief(state: AgentState) -> Command[Literal["write_draft_repo
     prompt = RESEARCH_BRIEF_PROMPT.format(
         messages=get_buffer_string(state.get("messages", [])),
         date=get_today_str()
-    ) + "\n\n请以JSON格式返回，格式为：{\"research_brief\": \"...\"}"
+    )
+
+    # 事件记忆层：命中历史事件时，注入「增量追踪」指令块，
+    # 让简报直接收敛到"只补最新进展"，而不是从零重新调研（省掉历史节点重搜）
+    increment_context = state.get("event_increment_context", "")
+    if increment_context:
+        prompt += "\n\n" + increment_context
+        logger.info("[MEMORY] research_brief 已注入增量追踪上下文（%d 字）", len(increment_context))
+
+    prompt += "\n\n请以JSON格式返回，格式为：{\"research_brief\": \"...\"}"
     logger.debug("write_research_brief invoking draft_model with prompt_length=%d", len(prompt))
 
     # 直接调用模型，手动解析JSON（DeepSeek不支持response_format）
@@ -74,8 +83,13 @@ def write_research_brief(state: AgentState) -> Command[Literal["write_draft_repo
             update={"research_brief": research_brief}
         )
 
-def write_draft_report(state: AgentState) -> Command[Literal["__end__"]]:
-    """生成提纲生成一个研究报告的草稿"""
+def write_draft_report(state: AgentState) -> Command[Literal["supervisor_subgraph", "final_report_generation"]]:
+    """生成提纲生成一个研究报告的草稿
+
+    默认下一步进 supervisor 主研究循环；
+    当 event_recall 判定为「历史事件增量追踪的 fast 模式」时（skip_research_loop=True），
+    直接跳到 final_report_generation——省掉整个主研究循环（拆子query/多子agent搜索/去噪/红队/评分迭代）。
+    """
 
     logger.debug(
         "write_draft_report invoked with research_brief present=%s",
@@ -102,7 +116,16 @@ def write_draft_report(state: AgentState) -> Command[Literal["__end__"]]:
     draft_report_prompt = draft_tpl.format(
         research_brief=research_brief,
         date=get_today_str()
-    ) + "\n\n请以JSON格式返回，格式为：{\"draft_report\": \"...\"}"
+    )
+
+    # 事件记忆层：把历史基线的「1.2 关键时间线 + 2.2 传闻状态机」预填进草稿，
+    # 让草稿在既有状态机上做增量更新（而不是每次从零开始列传闻）
+    memory_block = state.get("event_memory_block", "")
+    if memory_block:
+        draft_report_prompt += "\n\n" + memory_block
+        logger.info("[MEMORY] 草稿已注入历史基线（%d 字）", len(memory_block))
+
+    draft_report_prompt += "\n\n请以JSON格式返回，格式为：{\"draft_report\": \"...\"}"
 
     # 直接调用模型，手动解析JSON
     response = draft_model.invoke([HumanMessage(content=draft_report_prompt)])
@@ -115,14 +138,23 @@ def write_draft_report(state: AgentState) -> Command[Literal["__end__"]]:
         draft_report = text.strip().strip("`").strip()
     logger.debug("write_draft_report produced draft_report length=%d", len(draft_report))
 
-    return {
-        "research_brief": research_brief,
-        "draft_report": draft_report, 
-        "supervisor_messages": [
-            HumanMessage(content="Here is the draft report: " + draft_report),
-            HumanMessage(content=research_brief)
-        ]
-    }
+    # 增量 fast 模式：跳过 supervisor 主研究循环，直接进入最终报告生成
+    skip_loop = bool(state.get("skip_research_loop"))
+    target = "final_report_generation" if skip_loop else "supervisor_subgraph"
+    if skip_loop:
+        logger.info("[MEMORY] skip_research_loop=True → 跳过主研究循环，直达 final_report_generation")
+
+    return Command(
+        goto=target,
+        update={
+            "research_brief": research_brief,
+            "draft_report": draft_report,
+            "supervisor_messages": [
+                HumanMessage(content="Here is the draft report: " + draft_report),
+                HumanMessage(content=research_brief)
+            ],
+        },
+    )
 
 
 if __name__ == "__main__":

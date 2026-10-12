@@ -16,6 +16,7 @@ from deep_research.prompts import (
 )
 from deep_research.agents import write_research_brief, write_draft_report
 from deep_research.agents import supervisor_agent
+from deep_research.memory.memory_node import event_recall_node, event_memory_commit_node
 from deep_research.llm import get_chat_model
 
 
@@ -90,17 +91,22 @@ async def final_report_generation(state: AgentState, config: RunnableConfig | No
 deep_researcher_builder = StateGraph(AgentState, input_schema=AgentInputState)
 
 # 添加节点
+deep_researcher_builder.add_node("event_recall", event_recall_node)                 # 事件判重 + 增量进展追踪
 deep_researcher_builder.add_node("write_research_brief", write_research_brief)
 deep_researcher_builder.add_node("write_draft_report", write_draft_report)
 deep_researcher_builder.add_node("supervisor_subgraph", supervisor_agent)
 deep_researcher_builder.add_node("final_report_generation", final_report_generation)
+deep_researcher_builder.add_node("event_memory_commit", event_memory_commit_node)   # 归档回写（ES/JSONL）
 
 # 添加边
-deep_researcher_builder.add_edge(START, "write_research_brief")
+# event_recall 内部用 Command(goto=...) 跳到 write_research_brief（与 supervisor 子图同样的写法），
+# 命中历史事件时会把「增量追踪」上下文一并写进 state。
+deep_researcher_builder.add_edge(START, "event_recall")
 deep_researcher_builder.add_edge("write_research_brief", "write_draft_report")
 deep_researcher_builder.add_edge("write_draft_report", "supervisor_subgraph")
 deep_researcher_builder.add_edge("supervisor_subgraph", "final_report_generation")
-deep_researcher_builder.add_edge("final_report_generation", END)
+deep_researcher_builder.add_edge("final_report_generation", "event_memory_commit")
+deep_researcher_builder.add_edge("event_memory_commit", END)
 
 # 编译graph
 agent = deep_researcher_builder.compile()

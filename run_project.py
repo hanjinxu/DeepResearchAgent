@@ -109,7 +109,42 @@ async def main():
     with open(path, "w", encoding="utf-8") as fd:
         fd.write(final_report)
     print(f"\n{'=' * 60}\n✅ 调研报告已保存: {path}\n{'=' * 60}")
+
+    _print_memory_summary(result)
     print(f"\n📄 报告预览（前 2000 字）:\n{'-' * 60}\n{final_report[:2000]}")
+
+
+def _print_memory_summary(result: dict) -> None:
+    """打印事件记忆层的运行结果（判重命中情况 + 增值归档情况）。"""
+    meta = result.get("memory_meta") or {}
+    if not meta.get("enabled"):
+        print("\n🧠 事件记忆层: 未启用（config.yml → event_memory.enabled）")
+        return
+
+    print(f"\n{'=' * 60}\n🧠 事件记忆层\n{'-' * 60}")
+    if meta.get("error"):
+        print(f"  ⚠️ 判重阶段异常并已降级: {meta['error']}")
+    print(f"  存储后端 : {meta.get('store', '?')}　向量化: {meta.get('embedding', '?')}")
+    print(f"  事件档案 : {result.get('event_id') or '（未确定）'}")
+    print(f"  判重结论 : {'🔁 命中历史事件（增量追踪模式）' if meta.get('is_repeat') else '🆕 新事件（完整研究流程）'}"
+          f"　命中层级: {meta.get('level', '-')}　置信度: {meta.get('confidence', 0):.2f}")
+
+    if meta.get("trace"):
+        print("  判重轨迹 : " + " → ".join(meta["trace"]))
+    if meta.get("is_repeat"):
+        print(f"  增量检索 : {len(meta.get('delta_queries') or [])} 条「时间+关键词」检索式")
+        for q in (meta.get("delta_queries") or [])[:3]:
+            print(f"             · {q}")
+        print(f"  本轮进展 : {meta.get('delta_summary') or '（未发现新进展）'}")
+        print(f"  归位结果 : 新增时间线节点 {meta.get('delta_timeline_added', 0)} 个｜"
+              f"传闻状态更新 {meta.get('delta_rumor_updates', 0)} 条")
+
+    if meta.get("committed"):
+        print(f"  ✅ 已归档 : report_count={meta.get('report_count')}　"
+              f"累计时间线 {meta.get('timeline_size')} 节点　累计传闻 {meta.get('rumor_size')} 条")
+    elif meta.get("reason") != "disabled":
+        print(f"  ⚠️ 未归档 : {meta.get('reason') or meta.get('error') or '未知原因'}")
+    print("=" * 60)
 
 
 if __name__ == "__main__":
