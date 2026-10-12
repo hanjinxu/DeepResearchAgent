@@ -1,0 +1,94 @@
+stages:
+  prod:
+    cognition:
+      # 通用实例（AutoDL GPU0 :8000，supervisor/researcher/writer/draft/evaluator 共用）
+      qwen_general:
+        provider: openai_compatible
+        base_url: http://localhost:8000/v1
+        api_key: local-vllm
+        default_model: qwen3-7b
+        temperature: 0
+        timeout_seconds: 600
+        extra_body:
+          chat_template_kwargs:
+            enable_thinking: false
+        models:
+          qwen3-7b:
+            max_tokens: 8192
+      # 红队专用实例（AutoDL GPU1 :8001，后续微调只换这个实例的模型）
+      qwen_redteam:
+        provider: openai_compatible
+        base_url: http://localhost:8001/v1
+        api_key: local-vllm
+        default_model: qwen3-7b-redteam
+        temperature: 0
+        timeout_seconds: 600
+        extra_body:
+          chat_template_kwargs:
+            enable_thinking: false
+        models:
+          qwen3-7b-redteam:
+            max_tokens: 4096
+      # DeepSeek 官方 API（备用，切回时把 roles 的 backend 改回 deepseek 即可）
+      deepseek:
+        base_url: https://api.deepseek.com
+        api_key: sk-bb5dbfe9246a41b1865b534555f01758
+        organization: dingshixiong
+        default_model: deepseek-chat
+        temperature: 0
+        timeout_seconds: 600
+        models:
+          deepseek-chat:
+            # DeepSeek 官方 API 输出上限 8192，超过会返回 400
+            max_tokens: 8192
+    search:
+      backend: tavily
+      tavily:
+        api_key: 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
+        base_url: https://api.tavily.com
+        max_results: 3
+        topic: general
+        include_raw_content: true
+        timeout_seconds: 300
+    roles:
+      # 当前全部走 DeepSeek 官方 API（本地 vLLM 未部署）
+      # 切回本地 vLLM：backend 改回 qwen_general / qwen_redteam，
+      #                handle 改回 qwen3-7b / qwen3-7b-redteam
+      supervisor:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+        temperature: 0.3
+      red_team:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+      context_pruner:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+      researcher_main:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+        temperature: 0.3
+      researcher_summarizer:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+      researcher_compressor:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+      writer:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+      draft:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
+      evaluator:
+        backend: deepseek
+        handle: deepseek-chat
+        timeout_seconds: 600
