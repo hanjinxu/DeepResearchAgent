@@ -1,0 +1,41 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# ===== ⚠️ 本地密钥与配置（含明文 API key，严禁入库）=====
+# config.yml 已被历史提交跟踪过，仅在 .gitignore 里声明不够，
+# 已执行 git rm --cached config.yml 停止跟踪（本地文件保留）。
+# ⚠️ 历史提交里仍残留旧 key，需要到各平台轮换，光删文件无效。
+# 仓库里用 config.example.yml 作为模板。
+config.yml
+.env
+.env.*
+
+# ===== 工作区内部笔记（含调试过程，不入库）=====
+.workbuddy/
+
+# ===== 事件记忆层落盘数据 =====
+data/
+*.jsonl
+
+# ===== 运行产物 =====
+output_report_*.md
+run_*.log
+*.log
+
+# ===== Jupyter =====
+.ipynb_checkpoints/
+
+# ===== IDE / OS =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

@@ -1,3 +1,9 @@
+#==============================================================
+#  配置模板 —— 复制为 config.yml 后填入真实密钥
+#    cp config.example.yml config.yml
+#  ⚠️ config.yml 已在 .gitignore 中，请勿把真实密钥提交到仓库。
+#==============================================================
+
 stages:
   prod:
     cognition:
@@ -32,7 +38,7 @@ stages:
       # DeepSeek 官方 API（备用，切回时把 roles 的 backend 改回 deepseek 即可）
       deepseek:
         base_url: https://api.deepseek.com
-        api_key: sk-bb5dbfe9246a41b1865b534555f01758
+        api_key: {YOUR_API_KEY_HERE}
         organization: dingshixiong
         default_model: deepseek-chat
         temperature: 0
@@ -44,7 +50,7 @@ stages:
     search:
       backend: tavily
       tavily:
-        api_key: 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
+        api_key: {YOUR_API_KEY_HERE}
         base_url: https://api.tavily.com
         max_results: 3
         topic: general
