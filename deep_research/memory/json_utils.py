@@ -28,7 +28,10 @@ def extract_json_object(text: str) -> Dict[str, Any]:
         raise json.JSONDecodeError("empty model output", raw or "", 0)
 
     try:
-        parsed = json.loads(raw)
+        # strict=False：允许字符串里出现裸换行/制表符等控制字符。
+        # 模型输出多行文本时几乎必然带控制字符，strict=True 会直接报
+        # "Invalid control character"，导致整段内容被丢弃（实测历史日志里 53% 的摘要因此失败）。
+        parsed = json.loads(raw, strict=False)
         if isinstance(parsed, dict):
             return parsed
         if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
@@ -38,7 +41,7 @@ def extract_json_object(text: str) -> Dict[str, Any]:
 
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end > start:
-        return json.loads(raw[start:end + 1])
+        return json.loads(raw[start:end + 1], strict=False)
 
     raise json.JSONDecodeError("no JSON object found in model output", raw, 0)
 

@@ -200,6 +200,55 @@ def _maybe_import_provider(backend: str) -> None:
     logger.warning("No provider registered after attempting imports for backend '%s'", backend)
 
 
+def _maybe_wrap_with_cache(
+    backend: str,
+    provider: SearchProvider,
+    search_cfg: Dict[str, Any],
+) -> SearchProvider:
+    """按 config.yml 的 search.cache 配置，给 provider 包一层磁盘缓存。
+
+    mode=off 时原样返回，行为与改造前完全一致（默认关闭，不影响现有链路）。
+    """
+    cache_cfg = search_cfg.get("cache")
+    if not isinstance(cache_cfg, dict):
+        return provider
+
+    # 延迟 import，避免模块级循环依赖
+    from deep_research.tools.search_cache import CachedProvider, SearchCache, normalize_mode
+
+    # ⚠️ 必须走 normalize_mode：YAML 会把裸写的 on/off 解析成 bool
+    mode = normalize_mode(cache_cfg.get("mode", "off"))
+    if mode == "off":
+        return provider
+
+    cache = SearchCache(
+        cache_dir=str(cache_cfg.get("dir") or "./data/search_cache"),
+        mode=mode,
+        # strict_miss=True：replay 未命中直接抛错。训练/评测必须开，
+        # 否则空结果会混进样本（压测可以关，但要知道它改变了工作负载形态）
+        strict_miss=bool(cache_cfg.get("strict_miss", False)),
+    )
+    if cache.mode == "off":
+        return provider
+
+    logger.info(
+        "搜索缓存已启用：backend=%s mode=%s dir=%s",
+        backend, cache.mode, cache.dir,
+    )
+    return CachedProvider(provider, base_name=backend, cache=cache)
+
+
+def get_search_cache_stats() -> Dict[str, Any]:
+    """导出所有已构建 provider 的搜索缓存统计（供压测报告/run_project 打印）。"""
+    out: Dict[str, Any] = {}
+    for key, provider in _PROVIDER_CACHE.items():
+        stats_fn = getattr(provider, "stats", None)
+        if callable(stats_fn):
+            backend = key[-1] if isinstance(key, tuple) and key else "unknown"
+            out[backend] = stats_fn()
+    return out
+
+
 def _get_provider(search_cfg: Dict[str, Any]) -> tuple[str, SearchProvider]:
     """根据config.yml获取search provider"""
 
@@ -221,6 +270,9 @@ def _get_provider(search_cfg: Dict[str, Any]) -> tuple[str, SearchProvider]:
             f"Unsupported search backend '{backend}'. "
             "Ensure the provider module register a provider via override_provider/register_provider."
         )
+
+    # 按需包一层搜索缓存（mode=off 时行为不变）
+    provider = _maybe_wrap_with_cache(backend, provider, search_cfg)
 
     _PROVIDER_CACHE[cache_key] = provider
     logger.debug("Search provider resolved and cached for backend='%s'", backend)

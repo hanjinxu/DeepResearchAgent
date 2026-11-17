@@ -181,7 +181,9 @@ def summarize_webpage_content(webpage_content: str) -> str:
         text = response.content
         json_match = re.search(r'\{.*"summary".*\}', text, re.DOTALL)
         if json_match:
-            parsed = json.loads(json_match.group())
+            # strict=False：模型返回的多行 summary 里常含裸换行，strict=True 会整段失败，
+            # 失败后降级成「前 1000 字截断」，等于把证据砍掉（历史日志里 19/36 次）
+            parsed = json.loads(json_match.group(), strict=False)
             summary = parsed.get("summary", "")
             key_excerpts = parsed.get("key_excerpts", "")
         else:

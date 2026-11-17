@@ -70,7 +70,8 @@ def write_research_brief(state: AgentState) -> Command[Literal["write_draft_repo
     text = response.content
     json_match = re.search(r'\{.*"research_brief".*\}', text, re.DOTALL)
     if json_match:
-        parsed = json.loads(json_match.group())
+        # strict=False：正文里带裸换行/制表符时 strict=True 会整段解析失败
+        parsed = json.loads(json_match.group(), strict=False)
         research_brief = parsed["research_brief"]
     else:
         # fallback: 去掉可能的markdown标记
@@ -132,7 +133,8 @@ def write_draft_report(state: AgentState) -> Command[Literal["supervisor_subgrap
     text = response.content
     json_match = re.search(r'\{.*"draft_report".*\}', text, re.DOTALL)
     if json_match:
-        parsed = json.loads(json_match.group())
+        # strict=False：正文里带裸换行/制表符时 strict=True 会整段解析失败
+        parsed = json.loads(json_match.group(), strict=False)
         draft_report = parsed["draft_report"]
     else:
         draft_report = text.strip().strip("`").strip()

@@ -103,7 +103,10 @@ deep_researcher_builder.add_node("event_memory_commit", event_memory_commit_node
 # 命中历史事件时会把「增量追踪」上下文一并写进 state。
 deep_researcher_builder.add_edge(START, "event_recall")
 deep_researcher_builder.add_edge("write_research_brief", "write_draft_report")
-deep_researcher_builder.add_edge("write_draft_report", "supervisor_subgraph")
+# ⚠️ 不要给 write_draft_report 加静态出边：该节点用 Command(goto=...) 显式路由
+#    （普通流程 → supervisor_subgraph，fast 模式 → final_report_generation）。
+#    LangGraph 对「静态边 + Command 目标」不是二选一，而是两条分支都调度 ——
+#    加了静态边会导致 fast 模式既跑主研究循环、又把没有研究笔记的提前报告送去归档。
 deep_researcher_builder.add_edge("supervisor_subgraph", "final_report_generation")
 deep_researcher_builder.add_edge("final_report_generation", "event_memory_commit")
 deep_researcher_builder.add_edge("event_memory_commit", END)

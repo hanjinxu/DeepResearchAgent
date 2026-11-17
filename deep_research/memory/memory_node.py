@@ -80,6 +80,24 @@ def _load_memory_cfg() -> Dict[str, Any]:
     return mem_cfg
 
 
+def _is_readonly_sampling(mem_cfg: Dict[str, Any]) -> bool:
+    """是否处于「只读采样」状态：可以读历史，但绝不写库。
+
+    为什么需要这个开关：GRPO 要求同一个 prompt 的 k 条轨迹从**同一初始状态**出发。
+    只要有一条轨迹跑完把结果写进事件库，后续轨迹进 event_recall 就会被判为重复事件、
+    切到增量分支（只补最新进展），轨迹形态与第一条完全不同 —— 组内比的不再是策略差异，
+    而是"你排第几条"，advantage 失去意义。更糟的是会诱导模型学会"第一次故意别写太好"。
+
+    优先级：环境变量 DR_MEMORY_READONLY > config 的 event_memory.store.write_enabled。
+    用环境变量的好处是采样脚本一行 prefix 就能切，不必改 config（改完容易忘记改回来）。
+    """
+    env = os.environ.get("DR_MEMORY_READONLY", "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    store_cfg = mem_cfg.get("store") or {}
+    return store_cfg.get("write_enabled") is False
+
+
 def _get_judge_model(mem_cfg: Dict[str, Any]):
     """判重/抽取用的 LLM。优先用配置里的 judge_role，不存在则回落到 draft 角色。"""
     role = mem_cfg.get("judge_role") or "event_judge"
@@ -384,6 +402,18 @@ async def event_memory_commit_node(
     mem_cfg = _load_memory_cfg()
     if not mem_cfg.get("enabled", False):
         return {"memory_meta": {"enabled": False}}
+
+    # 只读采样：读得到历史，但不落盘。保证同组 k 条轨迹起点一致（GRPO 的前提）。
+    if _is_readonly_sampling(mem_cfg):
+        logger.info("[MEMORY] 只读采样模式，跳过归档（event_memory_commit 不写库）")
+        return {
+            "memory_meta": {
+                **dict(state.get("memory_meta") or {}),
+                "enabled": True,
+                "committed": False,
+                "reason": "readonly_sampling",
+            }
+        }
 
     final_report = state.get("final_report", "") or ""
     if not final_report.strip():

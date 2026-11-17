@@ -195,7 +195,8 @@ def _extract_json_object(text: str) -> dict:
     start, end = raw.find("{"), raw.rfind("}")
     if start != -1 and end != -1 and end > start:
         raw = raw[start:end + 1]
-    return json.loads(raw)
+    # strict=False：结构化输出里的多行字段会带裸控制字符，strict=True 会整体失败
+    return json.loads(raw, strict=False)
 
 
 async def _decide_with_fallback(messages) -> SupervisorDecision:

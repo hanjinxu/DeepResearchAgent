@@ -82,6 +82,16 @@ def _build_openai_kwargs(
     temperature = role_cfg.get("temperature")
     if temperature is None:
         temperature = api_cfg.get("temperature")
+
+    # 训练采样期需要高温，才能让同一 prompt 的 k 条轨迹彼此不同（GRPO 的组内方差来源）。
+    # 用环境变量覆盖而不是改 config.yml：推理配置通常为 0，采样完必须能一键还原。
+    env_temperature = os.environ.get("DR_LLM_TEMPERATURE", "").strip()
+    if env_temperature:
+        try:
+            temperature = float(env_temperature)
+        except ValueError:
+            logger.warning("DR_LLM_TEMPERATURE=%r 不是合法数字，已忽略", env_temperature)
+
     if temperature is not None:
         kwargs["temperature"] = temperature
 

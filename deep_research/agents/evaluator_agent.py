@@ -33,7 +33,9 @@ def evaluate_draft_quality(research_brief: str, draft_report: str) -> Evaluation
     text = response.content
     json_match = re.search(r'\{.*"comprehensiveness_score".*\}', text, re.DOTALL)
     if json_match:
-        parsed = json.loads(json_match.group())
+        # strict=False：reason 字段里带裸换行会让解析整体失败，
+        # 失败后静默回落成 5/5/5，等于把判分变成常数（奖励方差直接归零）
+        parsed = json.loads(json_match.group(), strict=False)
     else:
         parsed = {"comprehensiveness_score": 5, "accuracy_score": 5, "coherence_score": 5, "reason": text[:200]}
     
