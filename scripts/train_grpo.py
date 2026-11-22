@@ -488,6 +488,10 @@ def main() -> int:
             "rewards": [round(r, 4) for r in kept_rewards],
             "comp_len": round(avg_len, 1),
             "n_kept": len(kept_texts), "n_drop": n_drop,
+            "n_items": [d["n_items"] for d in kept_details],
+            "coverage": round(sum(d["coverage"] for d in kept_details) / len(kept_details), 3),
+            "acc_pos": round(sum((d["acc_pos"] or 0) for d in kept_details) / len(kept_details), 3),
+            "acc_neg": round(sum((d["acc_neg"] or 0) for d in kept_details) / len(kept_details), 3),
             "elapsed_s": round(time.time() - t0, 1),
         }
         with log_path.open("a", encoding="utf-8") as fd:
