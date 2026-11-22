@@ -104,20 +104,32 @@ class RuleFinding:
 
 
 class RuleVerifier:
-    """按**批评指向的章节**分派到确定性规则。
+    """按**子项**分派（批评主张什么），用**位置**定位（去哪一节核对）。
 
-    ⚠️ 这里有一个极易踩的坑，务必记住：
-    红队提示词里的「子项编号」与报告里的「章节编号」是两套体系，编号相同但含义不同。
-        红队 2.3 = 衍生风险遗漏   ／  报告 2.3 = 信源可信度评级
-        红队 1.2 = 多源冲突遗漏   ／  报告 1.2 = 关键时间线
-        红队 3.3 = 时效要求缺失   ／  报告没有 3.3（属 4.x 处置建议）
-    早期版本按子项编号去查报告章节，3 条规则里 2 条查错了对象，
-    会把"红队提了衍生风险"错判成"信源评级是否有误"。
-    因此这里改为：**按批评自报的「位置」定位章节**，子项只用于推严重度。
+    两个编号体系必须分清：
+        子项 1.1 ~ 4.1  —— 红队提示词里的 10 类问题，决定"批评在主张什么"
+        章节 1.1 ~ 5.2  —— 报告的结构，决定"去哪里核对"
+    编号相同但含义不同：红队 2.3 是"衍生风险遗漏"，报告 2.3 是"信源可信度评级"。
+
+    ═══ 两条踩过的坑，别重复 ═══
+    坑一：按子项编号直接查同名章节（旧实现）。
+          → 红队说"2.3 衍生风险遗漏"，规则却去查"2.3 信源评级是否合理"。
+    坑二：只按位置分派（上一版）。
+          → 一条"风险等级误判"的批评，只要位置碰巧指向 4.x，
+            就被判成"时效确实缺失"→ 把不相干的结论算到它头上。
+
+    正确做法：子项决定**能不能判**，位置决定**判哪里**。
+
+    ═══ 只实现真正可确定性判定的子项 ═══
+        3.3 时效要求缺失 → 4.x 是否含时限标记（可确定性判定）
+        2.3 衍生风险遗漏 → 需要"完整风险全集"才知道漏没漏，规则做不到
+        1.2 多源冲突遗漏 → 需要跨源比对，规则做不到
+        其余               → 一律 unverifiable，交给 judge
+    宁可少判，不可错判：错判会污染 precision 统计，进而误导对红队的判断。
     """
 
-    # 有确定性规则的章节
-    SUPPORTED = {"2.3", "1.2", "4.1", "4.2", "4.3"}
+    # 只有这些子项有确定性规则
+    SUPPORTED = {"3.3"}
 
     def __init__(self, draft: str):
         self.draft = draft or ""
@@ -191,25 +203,17 @@ class RuleVerifier:
             return RuleFinding(True, f"1.2 存在来源日期早于事件时间的行：{mismatches[0]}")
         return RuleFinding(False, "1.2 每行都有来源，且未发现日期倒置")
 
-    def check(self, section: str) -> RuleFinding:
-        """按章节号检查。section 必须是**报告章节**（来自批评的「位置」）。"""
-        sec = (section or "").strip()
-        if sec == "2.3":
-            return self._check_source_tier()
-        if sec == "1.2":
-            return self._check_timeline_date()
-        if sec.startswith("4."):
+    def check(self, subitem: str) -> RuleFinding:
+        """按子项检查。参数必须是**红队子项编号**（1.1~4.1），不是报告章节号。"""
+        sub = (subitem or "").strip()
+        if sub == "3.3":
             return self._check_timeliness()
-        return RuleFinding(None, f"章节 {sec or '未指明'} 没有对应规则")
+        if sub in ("2.3", "1.2"):
+            return RuleFinding(None, f"子项 {sub} 需要外部信息才能判定，规则不做")
+        return RuleFinding(None, f"子项 {sub or '未编号'} 没有对应规则")
 
     def verify(self, crit: Critique) -> Verification:
-        section = _section_of(crit.target_section)
-        if not section:
-            return Verification(
-                crit.critique_id, "unverifiable",
-                f"位置里没有可识别的章节号：{crit.target_section[:40]!r}", "rule",
-            )
-        f = self.check(section)
+        f = self.check(crit.subitem)
         if f.exists is None:
             return Verification(crit.critique_id, "unverifiable", f.reason, "rule")
         verdict = "valid" if f.exists else "invalid"
