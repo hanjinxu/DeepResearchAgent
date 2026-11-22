@@ -269,15 +269,16 @@ check("按编号切段", {"2.1", "2.3", "4.1"} <= set(secs), str(sorted(secs)))
 
 rv = RuleVerifier(SEC_DRAFT)
 check("2.3 自媒体评中 → 判有错", rv.check("2.3").exists is True, str(rv.check("2.3")))
-check("4.x 无时效标签 → 判缺失", rv.check("3.3").exists is True, str(rv.check("3.3")))
-check("未支持子项判不了", rv.check("2.1").exists is None)
+check("4.x 无时效标签 → 判缺失", rv.check("4.1").exists is True, str(rv.check("4.1")))
+check("未支持章节判不了", rv.check("2.1").exists is None)
+check("子项 3.3 不再被当成章节（旧 bug 回归）", rv.check("3.3").exists is None)
 
 clean = SEC_DRAFT.replace("| 微博营销号转载 | **中** | 未经核实 |", "| 微博营销号转载 | **低** | 未经核实 |")
 rv2 = RuleVerifier(clean)
 check("2.3 自媒体评低 → 判无错", rv2.check("2.3").exists is False, str(rv2.check("2.3")))
 
 with_time = SEC_DRAFT.replace("证据保全、发律师函。", "24h 内完成证据保全，72 小时内发律师函。")
-check("4.x 有时效标签 → 判无缺失", RuleVerifier(with_time).check("3.3").exists is False)
+check("4.x 有时效标签 → 判无缺失", RuleVerifier(with_time).check("4.1").exists is False)
 
 date_draft = """### 1.2 关键时间线
 | 时间 | 事件节点 | 来源 |

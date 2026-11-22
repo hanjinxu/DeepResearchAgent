@@ -104,10 +104,20 @@ class RuleFinding:
 
 
 class RuleVerifier:
-    """按子项分派到确定性规则。"""
+    """按**批评指向的章节**分派到确定性规则。
 
-    # 每条规则只处理"子项与规则直接对应"的情形，避免把不相干的批评判成 valid
-    SUPPORTED = {"2.3", "3.3", "1.2"}
+    ⚠️ 这里有一个极易踩的坑，务必记住：
+    红队提示词里的「子项编号」与报告里的「章节编号」是两套体系，编号相同但含义不同。
+        红队 2.3 = 衍生风险遗漏   ／  报告 2.3 = 信源可信度评级
+        红队 1.2 = 多源冲突遗漏   ／  报告 1.2 = 关键时间线
+        红队 3.3 = 时效要求缺失   ／  报告没有 3.3（属 4.x 处置建议）
+    早期版本按子项编号去查报告章节，3 条规则里 2 条查错了对象，
+    会把"红队提了衍生风险"错判成"信源评级是否有误"。
+    因此这里改为：**按批评自报的「位置」定位章节**，子项只用于推严重度。
+    """
+
+    # 有确定性规则的章节
+    SUPPORTED = {"2.3", "1.2", "4.1", "4.2", "4.3"}
 
     def __init__(self, draft: str):
         self.draft = draft or ""
@@ -181,17 +191,25 @@ class RuleVerifier:
             return RuleFinding(True, f"1.2 存在来源日期早于事件时间的行：{mismatches[0]}")
         return RuleFinding(False, "1.2 每行都有来源，且未发现日期倒置")
 
-    def check(self, subitem: str) -> RuleFinding:
-        if subitem == "2.3":
+    def check(self, section: str) -> RuleFinding:
+        """按章节号检查。section 必须是**报告章节**（来自批评的「位置」）。"""
+        sec = (section or "").strip()
+        if sec == "2.3":
             return self._check_source_tier()
-        if subitem == "3.3":
-            return self._check_timeliness()
-        if subitem == "1.2":
+        if sec == "1.2":
             return self._check_timeline_date()
-        return RuleFinding(None, f"子项 {subitem or '未编号'} 没有对应规则")
+        if sec.startswith("4."):
+            return self._check_timeliness()
+        return RuleFinding(None, f"章节 {sec or '未指明'} 没有对应规则")
 
     def verify(self, crit: Critique) -> Verification:
-        f = self.check(crit.subitem)
+        section = _section_of(crit.target_section)
+        if not section:
+            return Verification(
+                crit.critique_id, "unverifiable",
+                f"位置里没有可识别的章节号：{crit.target_section[:40]!r}", "rule",
+            )
+        f = self.check(section)
         if f.exists is None:
             return Verification(crit.critique_id, "unverifiable", f.reason, "rule")
         verdict = "valid" if f.exists else "invalid"
@@ -199,6 +217,15 @@ class RuleVerifier:
 
 
 _DATE_RE = re.compile(r"(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})")
+
+# 批评「位置」字段里的章节号。范围比子项宽（报告有 5.1/5.2），所以到 5。
+_SECTION_IN_TARGET_RE = re.compile(r"(?<![\d.])([1-5]\.[1-3])(?![\d])")
+
+
+def _section_of(target: str) -> str:
+    """从「位置」里抽出章节号，例如「③ 法律风险识别 > 3.1 可能触发…」→ 3.1。"""
+    m = _SECTION_IN_TARGET_RE.search(target or "")
+    return m.group(1) if m else ""
 
 
 def _first_date(text: str) -> Optional[Tuple[int, int, int]]:
