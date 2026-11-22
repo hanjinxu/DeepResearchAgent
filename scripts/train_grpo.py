@@ -117,8 +117,11 @@ def main() -> int:
                     help="多轮：每轮判一次、写作改一次。1=单轮（原行为）")
     ap.add_argument("--writer-role", default="writer",
                     help="多轮里负责改写的角色（走 API 或本地）")
-    ap.add_argument("--revise-max-tokens", type=int, default=4000,
-                    help="改写输出的 token 上限")
+    ap.add_argument("--revise-max-tokens", type=int, default=8000,
+                    help="改写输出的 token 上限。报告 1.5 万字需 10k+ token，"
+                         "给少了会被截断成半篇")
+    ap.add_argument("--revise-min-ratio", type=float, default=0.6,
+                    help="改写稿字数低于原文的比例下限，低于则丢弃改写、保留原稿")
     ap.add_argument("--teacher-role", default="evaluator",
                     help="给 20 条内容项出参考答案的教师角色（必须与 policy 不同源）")
     ap.add_argument("--no-teacher", action="store_true",
@@ -395,7 +398,16 @@ def main() -> int:
         resp = writer_model.invoke([_HM(content=prompt)],
                                    max_tokens=args.revise_max_tokens)
         text = resp.content if isinstance(resp.content, str) else str(resp.content)
-        return text.strip()
+        text = text.strip()
+
+        # 长度闸门：改写稿不到原文 60% 就判定为截断/改坏，保留原稿。
+        # 实测踩过：报告 14973 字、max_tokens 只给 4000，③④ 段被截掉，
+        # 教师只能核对 8 条（20 条里 12 条对不上），整条轨迹的 reward 失真。
+        if len(text) < args.revise_min_ratio * len(cur_draft):
+            print(f"    [WARN] 改写稿仅 {len(text)} 字（原文 {len(cur_draft)} 字），")
+            print(f"           低于 {args.revise_min_ratio:.0%} 阈值，保留原稿继续")
+            return cur_draft
+        return text
 
     def rollout_trajectory(draft: str, fp0: str) -> "Traj":
         turns = []
