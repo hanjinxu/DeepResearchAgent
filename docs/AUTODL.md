@@ -79,6 +79,21 @@ CUDA_VISIBLE_DEVICES=1 nohup vllm serve /root/autodl-tmp/models/Qwen3-8B \
 
 两个都在**同一台机器**上用 8000/8001，脚本走 `localhost`，不需要开公网端口。
 
+> **V100 / Volta（SM70）必读**
+>
+> 当前实例若是 V100-32GB，上面两条命令要加三个参数，否则起不来或报错：
+>
+> ```bash
+> export VLLM_ATTENTION_BACKEND=XFORMERS   # V100 不支持 FlashAttention-2（需 SM80+）
+> # 命令内追加：
+>   --dtype float16 \                        # V100 无 bf16，Qwen3 默认 bf16 必须降级
+>   --enforce-eager \                        # 跳过 CUDA graph，V100 上易出错且更省显存
+>   --max-model-len 16384                    # 先保守，跑通再试 32768
+> ```
+>
+> 若报 `no supported attention backend`：换 `VLLM_ATTENTION_BACKEND=TORCH_SDPA`；
+> 仍失败则降版本 `pip install vllm==0.6.6`（0.7+ 逐步移除 xformers，V100 反而更难）。
+
 确认就绪：
 
 ```bash
@@ -215,6 +230,12 @@ python scripts/train_grpo.py \
 | `--max-prompt-chars` | 草稿进 prompt 的字符上限（头尾保留） | 覆盖更多上下文，显存涨 |
 | `--rollout-chunk` | 一次 generate 几条 | 快，但显存涨 |
 | `--k` | 每组采样条数 | 组内方差更稳，成本线性涨 |
+
+> **V100 上训练的两个额外注意**
+>
+> 1. 脚本会自动检测 bf16 不支持 → 退到 fp16 并启用 `GradScaler`。
+>    如果看到 loss 变 NaN，先确认日志里有 `已启用 fp16 + GradScaler` 这行。
+> 2. fp16 下梯度更容易下溢，`--lr` 建议先用 5e-6，别直接上 1e-5。
 
 ### 5.7 看曲线
 

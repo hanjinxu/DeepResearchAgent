@@ -173,6 +173,12 @@ def main() -> int:
     model.print_trainable_parameters()
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
+    # V100（Volta, SM70）没有 bf16，只能退到 fp16；fp16 反向传播会梯度下溢，
+    # 必须配 GradScaler，否则几十步后 loss 变 NaN，看起来像"训崩了"其实只是没缩放。
+    scaler = torch.amp.GradScaler("cuda", enabled=(dtype == torch.float16))
+    if dtype == torch.float16:
+        print(">>> 检测到不支持 bf16（V100 等 Volta 卡），已启用 fp16 + GradScaler")
+
     # ---------- 核实器 ----------
     judge = None if args.no_judge else JudgeVerifier()
 
@@ -301,10 +307,11 @@ def main() -> int:
         loss = policy_loss + args.kl_coef * kl
 
         # 真正的梯度累积：每 grad_accum 步才更新一次
-        (loss / args.grad_accum).backward()
+        scaler.scale(loss / args.grad_accum).backward()
         accum += 1
         if accum >= args.grad_accum:
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             opt.zero_grad(set_to_none=True)
             accum = 0
 
