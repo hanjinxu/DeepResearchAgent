@@ -333,26 +333,43 @@ def main() -> int:
     def seq_logp(text_prompt: str, completion: str, ref: bool = False) -> Tuple[torch.Tensor, int]:
         """返回 (completion 的逐 token logprob 均值, completion token 数)。
 
-        ref=True 时禁用 LoRA adapter，得到参考策略的 logprob——
-        KL 项就是 policy 与它的逐 token 差。这是 GRPO 里"不跑偏"的唯一约束。
+        显存关键：只算 completion 位置的 logits。
+            整条序列 [1, 12k, 151936] 的 bf16 logits 是 3.6G，
+            `.float()` 再翻一倍到 7.3G —— 这是 40G 卡上 OOM 的直接原因。
+            logits_to_keep=n_comp 让 lm_head 只算最后 n 个位置，
+            显存降到原来的 1/17（700 vs 12000 个位置）。
+        数值关键：用 F.cross_entropy 而不是手工 log_softmax + gather。
+            cross_entropy 是融合实现，不会把整个 [n, V] 的 float32 softmax 落盘。
         """
         import contextlib
 
         p_ids = tok(to_chat(text_prompt), return_tensors="pt", truncation=True,
                     max_length=8192).input_ids
         c_ids = tok(completion, return_tensors="pt", add_special_tokens=False).input_ids
-        if c_ids.shape[1] == 0:
+        n_comp = int(c_ids.shape[1])
+        if n_comp == 0:
             return torch.zeros((), device=model.device), 0
+
         ids = torch.cat([p_ids, c_ids], dim=1).to(model.device)
+        labels = ids[:, -n_comp:]          # 最后 n 个 token 就是 completion
         ctx = model.disable_adapter() if ref else contextlib.nullcontext()
+
         with ctx:
-            logits = model(input_ids=ids).logits[:, :-1]
-            labels = ids[:, 1:]
-            lp = F.log_softmax(logits.float(), dim=-1).gather(
-                -1, labels.unsqueeze(-1)).squeeze(-1)
-        start = p_ids.shape[1] - 1
-        lp_comp = lp[0, start:]
-        return lp_comp.mean(), int(lp_comp.shape[0])
+            try:
+                logits = model(input_ids=ids, logits_to_keep=n_comp).logits
+            except TypeError:
+                # 老版本 transformers 不认 logits_to_keep，退回全量再切片
+                logits = model(input_ids=ids).logits[:, -n_comp:, :]
+
+            nll = F.cross_entropy(
+                logits.reshape(-1, logits.size(-1)).float(),
+                labels.reshape(-1),
+                reduction="none",
+            )
+            lp_comp = -nll
+            del logits
+
+        return lp_comp.mean(), n_comp
 
     # ---------- 训练 ----------
     print(f">>> 开始训练：{args.steps} 步｜k={args.k}｜lr={args.lr}｜kl={args.kl_coef}"
@@ -381,6 +398,9 @@ def main() -> int:
 
         model.eval()   # 采样时关掉 LoRA dropout，否则同一条 prompt 的差异里混进 dropout 噪声
         texts = rollout(prompt)
+        # 生成阶段的 KV cache 很占显存，先还给 allocator，
+        # 否则紧接着算 logprob 时容易"明明该够却 OOM"
+        torch.cuda.empty_cache()
         if args.smoke:
             print(f"--- 第一条生成（{len(texts[0])} 字）---")
             print(texts[0][:400].replace("\n", " ⏎ "))
