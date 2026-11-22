@@ -125,8 +125,10 @@ def main() -> int:
     if args.smoke:
         args.steps = min(args.steps, 2)
         args.k = 2
-        args.max_new_tokens = 120
-        args.max_prompt_chars = 2000
+        # 20 条判定至少要 300~500 token 才写得完，120 会截断成"解析不到 5 条"
+        args.max_new_tokens = 700
+        # 也不能压太狠：内容项要读完整节才能判，2000 字只剩个开头
+        args.max_prompt_chars = 6000
         args.rollout_chunk = 1
         args.log_every = 1
         print(">>> 冒烟模式：steps=2, k=2, max_new_tokens=120, prompt≤2000 字")
@@ -249,6 +251,21 @@ def main() -> int:
         print(f">>> 教师标注 {fp}: {len(labels)} 条可判")
         return labels
 
+    MIN_TEACHER_ITEMS = 8
+
+    def draft_is_usable(fp: str, draft: str) -> Tuple[bool, int]:
+        """教师都没法判的草稿不能用来训练。
+
+        实测：一份「AI Agent Memory 调研报告」不是法务骨架，20 条内容项
+        只有 1 条可判。这类草稿参与训练只会让模型学到"随便判几条"。
+        """
+        try:
+            n = len(teacher_labels(draft, fp))
+        except Exception as exc:  # noqa: BLE001
+            print(f"    [WARN] 教师标注失败 {fp}: {str(exc)[:80]}")
+            return False, 0
+        return n >= MIN_TEACHER_ITEMS, n
+
     def reward_of(draft: str, fp: str, texts: Sequence[str]) -> Tuple[List[float], List[dict]]:
         """奖励 = 与教师判定的一致率。
 
@@ -307,6 +324,18 @@ def main() -> int:
     for step in range(1, args.steps + 1):
         fp, draft = keys[(step - 1) % len(keys)]
         prompt = build_prompt(draft)
+
+        ok, n_label = draft_is_usable(fp, draft)
+        if not ok:
+            skipped += 1
+            rec = {"step": step, "skipped": "draft_unusable",
+                   "draft": fp, "teacher_items": n_label}
+            with log_path.open("a", encoding="utf-8") as fd:
+                fd.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if step % args.log_every == 0:
+                print(f"[{step:>3}] 跳过（该草稿教师只判出 {n_label} 条，"
+                      f"低于 {MIN_TEACHER_ITEMS} 条门槛）")
+            continue
 
         model.eval()   # 采样时关掉 LoRA dropout，否则同一条 prompt 的差异里混进 dropout 噪声
         texts = rollout(prompt)
