@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -98,6 +98,7 @@ def main() -> int:
 
     all_scores = []
     coverage_all = []
+    drop_counter: Counter = Counter()
 
     for fp, items in by_draft.items():
         draft = drafts.get(fp, "")
@@ -110,6 +111,8 @@ def main() -> int:
 
             cov = verifier.coverage(vers)
             coverage_all.append(cov)
+            for hit in fr.dropped:
+                drop_counter[hit.rule] += 1
 
             s = score_sample(
                 prompt=fp,
@@ -134,6 +137,14 @@ def main() -> int:
     print(f"\n核实覆盖率：{judged_crit}/{total_crit} = "
           f"{(judged_crit / total_crit if total_crit else 0):.0%}"
           f"（其余 {total_crit - judged_crit} 条判为 unverifiable，不计分）")
+
+    if drop_counter:
+        n_drop = sum(drop_counter.values())
+        print(f"\n过滤 {n_drop} 条，原因分布：")
+        for rule, cnt in drop_counter.most_common():
+            print(f"  {rule:<22}{cnt:>4}")
+        print("  （no_quote 多说明模型没按要求引原句；"
+              "no_target 多说明不写位置）")
 
     var_report = group_variance_report({g.prompt: [s.total for s in g.samples] for g in groups})
     print(f"\n组内方差：{var_report['verdict']}")

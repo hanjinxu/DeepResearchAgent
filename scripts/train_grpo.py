@@ -268,27 +268,48 @@ def main() -> int:
         rewards, details = reward_of(draft, texts)
         model.train()
 
-        mean_r = sum(rewards) / len(rewards)
-        std_r = (sum((r - mean_r) ** 2 for r in rewards) / len(rewards)) ** 0.5
-        advs = normalize_advantages(rewards)
+        # ⚠️ 只用可训样本算优势，必须排除 trainable=False 的（PASS / 全被过滤）。
+        # 否则：PASS 得 0 分，提 3 条错批评得 -2 分 → 优势指向"什么都不说"，
+        # 模型会精确地学会沉默。这是整套奖励里最隐蔽的 reward hacking 入口：
+        # 它不报错、不像 bug，只会让报告越来越"干净"而信息量越来越低。
+        keep = [(t, r) for t, r, d in zip(texts, rewards, details) if d["trainable"]]
+        n_drop = len(texts) - len(keep)
+
+        if len(keep) < 2:
+            skipped += 1
+            rec = {"step": step, "skipped": "too_few_trainable",
+                   "n_kept": len(keep), "n_drop": n_drop,
+                   "rewards": [round(r, 4) for r in rewards]}
+            with log_path.open("a", encoding="utf-8") as fd:
+                fd.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if step % args.log_every == 0:
+                print(f"[{step:>3}] 跳过（可训样本 {len(keep)}<2，"
+                      f"丢弃 {n_drop} 条不可训）")
+            continue
+
+        kept_texts = [t for t, _ in keep]
+        kept_rewards = [r for _, r in keep]
+        mean_r = sum(kept_rewards) / len(kept_rewards)
+        std_r = (sum((r - mean_r) ** 2 for r in kept_rewards) / len(kept_rewards)) ** 0.5
+        advs = normalize_advantages(kept_rewards)
 
         if std_r < 1e-6 or all(abs(a) < 1e-9 for a in advs):
             skipped += 1
             rec = {"step": step, "skipped": "zero_variance",
                    "reward_mean": round(mean_r, 4), "reward_std": round(std_r, 4),
-                   "rewards": [round(r, 4) for r in rewards]}
+                   "n_drop": n_drop, "rewards": [round(r, 4) for r in kept_rewards]}
             with log_path.open("a", encoding="utf-8") as fd:
                 fd.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if step % args.log_every == 0:
                 print(f"[{step:>3}] 跳过（组内无方差）reward={mean_r:.3f} "
-                      f"rewards={[round(r,2) for r in rewards]}")
+                      f"rewards={[round(r,2) for r in kept_rewards]}")
             continue
 
         # 逐条算 logprob（不批量：序列长度差异大，桶排序收益不值得这层复杂度）
         loss_terms = []
         kl_terms = []
         comp_lens = []
-        for text, adv in zip(texts, advs):
+        for text, adv in zip(kept_texts, advs):
             lp_pi, n = seq_logp(prompt, text, ref=False)
             if n == 0:
                 continue
@@ -323,9 +344,9 @@ def main() -> int:
             "kl": round(float(kl), 5),
             "reward_mean": round(mean_r, 4), "reward_std": round(std_r, 4),
             "adv_abs_mean": round(adv_abs, 4),
-            "rewards": [round(r, 4) for r in rewards],
+            "rewards": [round(r, 4) for r in kept_rewards],
             "comp_len": round(avg_len, 1),
-            "n_usable": [d["n_usable"] for d in details],
+            "n_kept": len(kept_texts), "n_drop": n_drop,
             "elapsed_s": round(time.time() - t0, 1),
         }
         with log_path.open("a", encoding="utf-8") as fd:
@@ -334,7 +355,7 @@ def main() -> int:
         if step % args.log_every == 0:
             print(f"[{step:>3}] loss={float(loss):+.4f} kl={float(kl):+.4f} "
                   f"r={mean_r:+.3f}±{std_r:.3f} adv={adv_abs:.3f} len={avg_len:.0f}"
-                  f" usable={rec['n_usable']}")
+                  f" kept={len(kept_texts)}/{len(texts)}")
 
         if step % 20 == 0:
             ckpt = out_dir / f"lora_step{step}"
