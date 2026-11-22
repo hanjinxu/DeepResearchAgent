@@ -25,6 +25,12 @@
     2. 组内 std —— 四个样本分得开不开
 
 两个数都不合格的话，先别接训练。
+
+要算真实奖励还得有核实器：
+    from deep_research.flywheel import CombinedVerifier, RuleVerifier
+
+    verifier = CombinedVerifier(draft, judge=JudgeVerifier())   # 规则优先，判不了问 judge
+    verifications = verifier.verify_all(critiques)
 """
 
 from deep_research.flywheel.schema import (
@@ -62,6 +68,13 @@ from deep_research.flywheel.export import (
     summarize_doc,
 )
 from deep_research.flywheel.pipeline import score_group, score_output
+from deep_research.flywheel.verifier import (
+    CombinedVerifier,
+    JudgeVerifier,
+    RuleVerifier,
+    RuleFinding,
+    split_sections,
+)
 
 __all__ = [
     "Critique",
@@ -93,4 +106,9 @@ __all__ = [
     "export_grpo",
     "load_export",
     "summarize_doc",
+    "RuleVerifier",
+    "JudgeVerifier",
+    "CombinedVerifier",
+    "RuleFinding",
+    "split_sections",
 ]
