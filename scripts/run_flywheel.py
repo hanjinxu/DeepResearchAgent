@@ -63,6 +63,8 @@ def main() -> int:
     ap.add_argument("--raw", default="data/flywheel/raw.jsonl")
     ap.add_argument("--out", default="data/flywheel/samples.json")
     ap.add_argument("--no-judge", action="store_true", help="只用规则核实（免费）")
+    ap.add_argument("--no-quote-check", dest="require_quote", action="store_false",
+                    help="关闭「必须引用原文」过滤（仅当使用旧版红队提示词时需要）")
     ap.add_argument("--min-group", type=int, default=2)
     args = ap.parse_args()
 
@@ -103,7 +105,7 @@ def main() -> int:
 
         for it in items:
             crits = parse_critiques(it.get("raw", ""))
-            fr = filter_critiques(crits, draft)
+            fr = filter_critiques(crits, draft, require_quote=args.require_quote)
             vers = verifier.verify_all(fr.usable)
 
             cov = verifier.coverage(vers)

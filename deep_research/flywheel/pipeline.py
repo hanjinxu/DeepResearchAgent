@@ -37,10 +37,12 @@ def score_output(
     verifications: Optional[Iterable[Verification]] = None,
     *,
     law_validator=None,
+    require_quote: bool = False,
 ) -> SampleScore:
     """把一次红队原始输出变成可训练样本（含过滤与打分）。"""
     crits: List[Critique] = parse_critiques(raw)
-    fr = filter_critiques(crits, draft, law_validator=law_validator)
+    fr = filter_critiques(crits, draft, law_validator=law_validator,
+                          require_quote=require_quote)
 
     by_id: Dict[str, Verification] = {v.critique_id: v for v in (verifications or [])}
     kept_ver: List[Verification] = [

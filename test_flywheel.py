@@ -139,6 +139,27 @@ mis = [Critique(target_section="2.2", problem="2.2 冲突点未标注，遗漏�
 r = filter_critiques(mis, DRAFT)
 check("误报不在这里被丢弃（交给 reward）", r.trainable is True and len(r.usable) == 1)
 
+# 必须引用原文（配合新版提示词）
+from deep_research.flywheel.filters import has_verbatim_quote  # noqa: E402
+
+check("识别逐字引句", has_verbatim_quote("2.3 ｜ 原句：「竹知了是传统玩具」") is True)
+check("识别中文直角引号", has_verbatim_quote('2.3 ｜ 原句：「华为从未使用此名称」') is True)
+check("无引句", has_verbatim_quote("② 关键事实梳理 > 2.2 未确认传闻") is False)
+check("引句太短不算", has_verbatim_quote("2.3 ｜ 原句：「是的」") is False)
+
+no_q = [Critique(target_section="② 关键事实梳理 > 2.2", problem="2.2 冲突点未标注，遗漏了反方说法")]
+r = filter_critiques(no_q, DRAFT, require_quote=True)
+check("require_quote 开启时丢掉无引句的批评",
+      len(r.usable) == 0 and r.dropped[0].rule == "no_quote", r.reason)
+
+with_q = [Critique(target_section="2.2 ｜ 原句：「双方各执一词，需进一步核实」",
+                   problem="2.2 冲突点未标注，遗漏了反方说法")]
+r = filter_critiques(with_q, DRAFT, require_quote=True)
+check("带引句的批评保留", len(r.usable) == 1, r.reason)
+
+r = filter_critiques(no_q, DRAFT, require_quote=False)
+check("require_quote 关闭时行为不变（兼容旧提示词）", len(r.usable) == 1)
+
 # ===== 3. 奖励与优势 =====
 print("\n=== 3. 奖励与优势 ===")
 c1 = Critique(target_section="2.1", problem="2.1 风险定性错误，把名誉权纠纷写成数据合规")

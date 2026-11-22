@@ -50,6 +50,20 @@ RESTATE_OVERLAP = 0.80
 
 MIN_USABLE_CRITIQUES = 1
 
+# 原文引句：中英文引号都认，至少要 6 个字才算真引了一句
+_QUOTE_RE = re.compile(r"[「“\"]([^」”\"]{6,})[」”\"]")
+
+
+def has_verbatim_quote(target_section: str) -> bool:
+    """检查【原文位置】里有没有逐字引句。
+
+    为什么这条能治幻觉：模型编造"草稿遗漏了 X"时，它手里没有可抄的原句；
+    要求它抄一句，等于强制它回去把那一节读一遍。抄不出来 = 没读到 = 不该提。
+    这是把提示词里的软要求变成数据层的硬过滤。
+    """
+    m = _QUOTE_RE.search(target_section or "")
+    return bool(m and m.group(1).strip())
+
 
 @dataclass
 class FilterResult:
@@ -110,18 +124,31 @@ def filter_critiques(
     *,
     min_usable: int = MIN_USABLE_CRITIQUES,
     law_validator: Optional[Callable[[str], bool]] = None,
+    require_quote: bool = False,
 ) -> FilterResult:
-    """按四类规则过滤，产出可用批评列表与样本级 trainable 判定。
+    """按规则过滤，产出可用批评列表与样本级 trainable 判定。
 
     law_validator：可选的"法条是否真实存在"校验函数。
     不传时不拦——因为没有校验器就无从判断建议里引的法条是真是假，
     硬拦会误杀正确的法条引用。传了之后，校验不通过的批评记为
     hallucinated_law_ref 并剔除。
+
+    require_quote：要求【原文位置】里有逐字引句（配合新版红队提示词）。
+    开了之后，没抄原句的批评直接丢弃——这是对"凭印象说草稿缺 X"最有效的拦截。
+    用旧版提示词时必须关掉，否则会把所有批评都丢掉。
     """
     result = FilterResult()
     seen: Dict[str, int] = {}
 
     for crit in critiques:
+        # 规则 0：必须引用原文（可选，配合新版提示词）
+        if require_quote and not has_verbatim_quote(crit.target_section):
+            result.dropped.append(
+                ShortcutHit("no_quote", crit.critique_id,
+                            f"未逐字引用原文：{crit.target_section[:40]!r}")
+            )
+            continue
+
         # 规则 1：没有定位
         if _is_vague_target(crit.target_section):
             result.dropped.append(
