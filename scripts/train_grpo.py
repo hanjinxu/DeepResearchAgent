@@ -131,7 +131,9 @@ def main() -> int:
         args.max_prompt_chars = 6000
         args.rollout_chunk = 1
         args.log_every = 1
-        print(">>> 冒烟模式：steps=2, k=2, max_new_tokens=120, prompt≤2000 字")
+        print(f">>> 冒烟模式：steps={args.steps}, k={args.k}, "
+              f"max_new_tokens={args.max_new_tokens}, "
+              f"prompt≤{args.max_prompt_chars} 字")
 
     if not args.model:
         print("必须给 --model（LoRA 训练需要本地权重）", file=sys.stderr)
@@ -186,6 +188,26 @@ def main() -> int:
 
 
     # ---------- 工具 ----------
+    def to_chat(prompt: str) -> str:
+        """把裸 prompt 包成 Qwen 的 chat 格式。
+
+        vLLM 服务时走 /v1/chat/completions，会自动套 chat template；
+        而这里的 rollout 和 logprob 计算如果直接喂裸文本，
+        模型看到的输入分布和推理时不一致——实测后果是它不按指令输出，
+        解析不到 5 条判定，整批样本被判定为不可训。
+        """
+        msgs = [{"role": "user", "content": prompt}]
+        try:
+            return tok.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True,
+                enable_thinking=False,
+            )
+        except TypeError:
+            # 老版本 tokenizer 不认 enable_thinking
+            return tok.apply_chat_template(
+                msgs, tokenize=False, add_generation_prompt=True,
+            )
+
     def build_prompt(draft: str) -> str:
         brief_hint = "；".join(
             ln.lstrip("#").strip() for ln in draft.splitlines()[:5] if ln.strip()
@@ -197,7 +219,7 @@ def main() -> int:
 
     @torch.no_grad()
     def rollout(prompt: str) -> List[str]:
-        enc = tok(prompt, return_tensors="pt", truncation=True,
+        enc = tok(to_chat(prompt), return_tensors="pt", truncation=True,
                   max_length=8192).to(model.device)
         outs: List[str] = []
         for _ in range(0, args.k, args.rollout_chunk):
@@ -296,7 +318,7 @@ def main() -> int:
         """
         import contextlib
 
-        p_ids = tok(text_prompt, return_tensors="pt", truncation=True,
+        p_ids = tok(to_chat(text_prompt), return_tensors="pt", truncation=True,
                     max_length=8192).input_ids
         c_ids = tok(completion, return_tensors="pt", add_special_tokens=False).input_ids
         if c_ids.shape[1] == 0:
@@ -339,6 +361,10 @@ def main() -> int:
 
         model.eval()   # 采样时关掉 LoRA dropout，否则同一条 prompt 的差异里混进 dropout 噪声
         texts = rollout(prompt)
+        if args.smoke:
+            print(f"--- 第一条生成（{len(texts[0])} 字）---")
+            print(texts[0][:400].replace("\n", " ⏎ "))
+            print("---")
         rewards, details = reward_of(draft, fp, texts)
         model.train()
 
