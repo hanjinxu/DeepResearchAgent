@@ -113,7 +113,10 @@ def main() -> int:
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--rollout-chunk", type=int, default=2,
                     help="一次 generate 多少条，OOM 就调小")
-    ap.add_argument("--no-judge", action="store_true", help="只用规则核实（省 token）")
+    ap.add_argument("--teacher-role", default="evaluator",
+                    help="给 20 条内容项出参考答案的教师角色（必须与 policy 不同源）")
+    ap.add_argument("--no-teacher", action="store_true",
+                    help="调试用：无教师时奖励恒为 0，只验证链路能跑")
     ap.add_argument("--out", default="data/flywheel/grpo_run")
     ap.add_argument("--log-every", type=int, default=1)
     ap.add_argument("--smoke", action="store_true", help="冒烟测试：极小配置，只验证能跑")
@@ -137,10 +140,7 @@ def main() -> int:
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-    from deep_research.flywheel import (
-        filter_critiques, normalize_advantages, parse_critiques, score_sample,
-    )
-    from deep_research.flywheel.verifier import CombinedVerifier, JudgeVerifier
+    from deep_research.flywheel import normalize_advantages
     from deep_research.prompts import RED_TEAM_PROMPT
 
     out_dir = Path(args.out)
@@ -179,8 +179,9 @@ def main() -> int:
     if dtype == torch.float16:
         print(">>> 检测到不支持 bf16（V100 等 Volta 卡），已启用 fp16 + GradScaler")
 
-    # ---------- 核实器 ----------
-    judge = None if args.no_judge else JudgeVerifier()
+    # ---------- 教师模型（给 20 条内容项出参考答案）----------
+    # 必须与 policy 不同源：自己判自己，奖励没有意义。
+
 
     # ---------- 工具 ----------
     def build_prompt(draft: str) -> str:
@@ -208,21 +209,65 @@ def main() -> int:
                 outs.append(tok.decode(row[enc["input_ids"].shape[1]:], skip_special_tokens=True))
         return outs
 
-    def reward_of(draft: str, texts: Sequence[str]) -> Tuple[List[float], List[dict]]:
-        verifier = CombinedVerifier(draft, judge=judge)
+    # ---------- 教师标注（按草稿缓存）----------
+    # 20 条内容项没有规则真值，只能让更强的模型当老师。
+    # 关键在于**缓存**：草稿是固定的，几百步训练会反复用同一份草稿，
+    # 每步都调一次 API 既慢又费钱。按草稿指纹缓存后，2 份草稿只调 2 次。
+    from deep_research.flywheel.parser import parse_checklist
+    from deep_research.flywheel.rubric import build_content_checklist
+    from deep_research.prompts import RED_TEAM_CONTENT_PROMPT
+
+    teacher_path = out_dir / "teacher_labels.json"
+    teacher_cache: Dict[str, Dict[str, bool]] = {}
+    if teacher_path.exists():
+        teacher_cache = json.loads(teacher_path.read_text(encoding="utf-8"))
+        print(f">>> 复用教师标注缓存：{len(teacher_cache)} 份草稿")
+
+    def get_chat_model_teacher():
+        from deep_research.llm import get_chat_model
+
+        return get_chat_model(args.teacher_role)
+
+    teacher_model = None if args.no_teacher else get_chat_model_teacher()
+
+    def teacher_labels(draft: str, fp: str) -> Dict[str, bool]:
+        if fp in teacher_cache:
+            return {k: bool(v) for k, v in teacher_cache[fp].items()}
+        if teacher_model is None:
+            # --no-teacher：不调 API，奖励恒为 0，只用于验证链路能跑通
+            return {}
+        prompt = RED_TEAM_CONTENT_PROMPT.format(
+            draft_report=draft, checklist=build_content_checklist()
+        )
+        from langchain_core.messages import HumanMessage
+
+        raw = teacher_model.invoke([HumanMessage(content=prompt)]).content
+        labels = {v.check_id: v.passed for v in parse_checklist(raw) if v.passed is not None}
+        teacher_cache[fp] = {k: bool(v) for k, v in labels.items()}
+        teacher_path.write_text(json.dumps(teacher_cache, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
+        print(f">>> 教师标注 {fp}: {len(labels)} 条可判")
+        return labels
+
+    def reward_of(draft: str, fp: str, texts: Sequence[str]) -> Tuple[List[float], List[dict]]:
+        """奖励 = 与教师判定的一致率。
+
+        分母固定为「教师可判条数」，不是「模型自己判了几条」——
+        否则模型只输出 3 条且全对就能拿满分，直接学会少说话。
+        漏判 = 分子不涨、分母不变 = 自动受罚。
+        """
+        labels = teacher_labels(draft, fp)
+        denom = max(len(labels), 1)
+
         rewards, details = [], []
         for t in texts:
-            crits = parse_critiques(t)
-            fr = filter_critiques(crits, draft)
-            vers = verifier.verify_all(fr.usable)
-            s = score_sample(prompt="", critiques=fr.usable, verifications=vers,
-                             shortcut_hits=fr.dropped, filter_reason=fr.reason,
-                             trainable=fr.trainable)
-            rewards.append(s.total)
+            judged = {v.check_id: v.passed for v in parse_checklist(t) if v.passed is not None}
+            agree = sum(1 for k, v in judged.items() if k in labels and labels[k] == v)
+            rewards.append(round(agree / denom, 4))
             details.append({
-                "trainable": s.trainable, "n_usable": len(fr.usable),
-                "n_valid": s.breakdown.get("n_valid", 0),
-                "n_invalid": s.breakdown.get("n_invalid", 0),
+                # 少于 5 条判定的样本不可训：模型基本没按格式输出，学它没意义
+                "trainable": len(judged) >= 5,
+                "n_items": len(judged), "n_agree": agree, "denom": denom,
             })
         return rewards, details
 
@@ -265,7 +310,7 @@ def main() -> int:
 
         model.eval()   # 采样时关掉 LoRA dropout，否则同一条 prompt 的差异里混进 dropout 噪声
         texts = rollout(prompt)
-        rewards, details = reward_of(draft, texts)
+        rewards, details = reward_of(draft, fp, texts)
         model.train()
 
         # ⚠️ 只用可训样本算优势，必须排除 trainable=False 的（PASS / 全被过滤）。
