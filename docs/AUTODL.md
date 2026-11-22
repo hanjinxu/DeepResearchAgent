@@ -11,9 +11,14 @@
 | 1. 测写作执行率 | 需要写作模型 | `exec_report.json` | 执行率 ≥ 50% 才继续 |
 | 2. 采样红队 | 需要红队模型 | `raw.jsonl` | 解析率、多样性 |
 | 3. 体检 + 导出 | 不需要（CPU 即可） | `samples.json` | 核实覆盖率、组内 std |
-| 4. verl 训练 | 需要 | 训练曲线 | **脚本尚未实现** |
+| 4. GRPO 训练 | 需要 | `train_log.jsonl` + `curves.png` | reward 上升、KL 不失控 |
+| 5. 看曲线 | 不需要 | 终端摘要 / PNG | 见第 6 节判读规则 |
 
 第 3 步只读文件、不调模型（除非开 judge），可以在本机跑。
+
+训练用的是仓库自带的 `scripts/train_grpo.py`（单轮 GRPO，不依赖 verl）。
+为什么不用 verl：本任务是单轮生成，verl 的 env / reward manager / 数据集适配
+调试成本远超收益，而且版本耦合重。verl 仍然适合多轮、分布式场景。
 
 ---
 
@@ -167,6 +172,65 @@ python scripts/run_flywheel.py --raw data/flywheel/raw.jsonl \
 
 看两个数：**核实覆盖率**（<30% 说明奖励基本是常数）、**组内 std**（不可用组占比高就别训）。
 
+### 5.5 收集 bad case
+
+```bash
+python scripts/collect_badcases.py \
+  --samples data/flywheel/samples.json \
+  --out data/flywheel/badcases.md
+```
+
+输出分三堆：误报（红队指错）、被过滤（不可用）、无法判定。
+**第三堆最值得人工看**——它告诉你规则覆盖不到哪里，决定要不要扩规则或必须走 judge。
+
+### 5.6 GRPO 训练
+
+**先冒烟**（10 分钟，确认能跑通，不追求效果）：
+
+```bash
+# 训练要 LoRA，写作实例可以让位；这里只训红队，卡1 够用
+python scripts/train_grpo.py --smoke \
+  --model /root/autodl-tmp/models/Qwen3-8B \
+  --raw data/flywheel/raw.jsonl \
+  --out data/flywheel/grpo_smoke
+```
+
+冒烟只看三件事：能生成、能算奖励、能 backward。OOM 就调小 `--max-prompt-chars`。
+
+**正式跑**：
+
+```bash
+python scripts/train_grpo.py \
+  --model /root/autodl-tmp/models/Qwen3-8B \
+  --raw data/flywheel/raw.jsonl \
+  --steps 200 --k 4 --lr 1e-5 --kl-coef 0.04 \
+  --max-prompt-chars 12000 --rollout-chunk 2 \
+  --out data/flywheel/grpo_run1
+```
+
+关键参数与显存的关系：
+
+| 参数 | 作用 | 加大后 |
+|---|---|---|
+| `--max-prompt-chars` | 草稿进 prompt 的字符上限（头尾保留） | 覆盖更多上下文，显存涨 |
+| `--rollout-chunk` | 一次 generate 几条 | 快，但显存涨 |
+| `--k` | 每组采样条数 | 组内方差更稳，成本线性涨 |
+
+### 5.7 看曲线
+
+```bash
+python scripts/plot_train_log.py --log data/flywheel/grpo_run1/train_log.jsonl
+```
+
+终端会出一张 ASCII 表 + 判读结论；装了 matplotlib 还会存 `curves.png`。
+
+**四个指标怎么读**：
+
+- `reward_mean` 应缓慢上升。不升 = 奖励没区分度，或步数太少。
+- `reward_std` 长期接近 0 = 组内没信号，白训。这是最先该看的。
+- `kl` 涨太快 = 在追噪声，调大 `--kl-coef` 或降 lr。
+- `comp_len` 突然变短 = 模型学会"少说话"，检查是否有"少提批评更安全"的激励。
+
 ---
 
 ## 6. 常见问题
@@ -184,4 +248,5 @@ vLLM 还没起完。8B 加载 + CUDA graph 捕获通常 2~4 分钟，看 `vllm_8
 两个实例同时起会占满两张卡，训练时没卡可用。训练阶段停掉写作实例，或改用 AWQ 量化版（每个约 6G）。
 
 **Q: 训练怎么跑**
-**还没实现。** 仓库里目前只有样本侧（解析/过滤/核实/打分/导出），verl 的 dataset 适配和 reward 接口要另写。
+用 `scripts/train_grpo.py`（见 5.6）。它自己完成 rollout + 打分 + 反向传播，
+不依赖 verl。训练时**停掉写作实例**，把那张卡空出来——单卡 32G 跑 8B + LoRA 刚好。
