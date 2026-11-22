@@ -482,11 +482,20 @@ def main() -> int:
         ctx = model.disable_adapter() if ref else contextlib.nullcontext()
 
         with ctx:
+            # ⚠️ 位置对齐：模型在位置 i 的 logits 预测的是 token i+1。
+            # 要打分的是 ids 最后 n 个 token（索引 L-n .. L-1），
+            # 它们分别由 logits 位置 L-n-1 .. L-2 预测。
+            #
+            # 所以必须取 n+1 个位置再抹掉最后一个。写成 logits_to_keep=n 会差一位：
+            #   最后一个位置的上下文已经包含答案 token，让它"预测"那个 token
+            #   概率接近 1、logprob 接近 0 —— 这是标签泄漏，梯度几乎消失；
+            #   而第一个 completion token 从来没被打过分。
+            # 症状很隐蔽：训练照跑、loss 照出，但优化的是一组错位的 token。
             try:
-                logits = model(input_ids=ids, logits_to_keep=n_comp).logits
+                logits = model(input_ids=ids, logits_to_keep=n_comp + 1).logits[:, :-1, :]
             except TypeError:
                 # 老版本 transformers 不认 logits_to_keep，退回全量再切片
-                logits = model(input_ids=ids).logits[:, -n_comp:, :]
+                logits = model(input_ids=ids).logits[:, -(n_comp + 1):-1, :]
 
             nll = F.cross_entropy(
                 logits.reshape(-1, logits.size(-1)).float(),
