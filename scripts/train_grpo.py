@@ -359,14 +359,19 @@ def main() -> int:
             self.reward, self.detail = reward, detail
 
     class Traj:
-        __slots__ = ("turns", "reward")
+        __slots__ = ("turns", "reward", "end_reason")
 
-        def __init__(self, turns):
+        def __init__(self, turns, end_reason="limit"):
             self.turns = turns
+            self.end_reason = end_reason
             self.reward = sum(t.reward for t in turns) / max(len(turns), 1)
 
         @property
         def usable(self):
+            # end_reason="worse"：写作把报告改坏了，那一轮的低分是环境造成的，
+            # 不能算在红队头上——直接整条作废，而不是让红队背这个锅。
+            if self.end_reason == "worse":
+                return False
             return bool(self.turns) and all(t.detail["trainable"] for t in self.turns)
 
     def verdicts_to_instruction(raw: str) -> str:
@@ -424,6 +429,7 @@ def main() -> int:
         turns = []
         cur, cur_fp = draft, fp0
         prev_bad = None
+        end_reason = "limit"
         for ti in range(args.turns):
             pr = build_prompt(cur)
             comp = rollout(pr, n_total=1)[0]
@@ -431,21 +437,25 @@ def main() -> int:
             turns.append(Turn(pr, comp, rs[0], ds[0]))
 
             if ti == args.turns - 1:
+                end_reason = "limit"
                 break
 
             bad = frozenset(v.check_id for v in parse_checklist(comp)
                             if v.status == "fail")
             if not bad:
+                end_reason = "all_pass"
                 break                       # 出口 1：全通过
             if prev_bad is not None and bad == prev_bad:
+                end_reason = "no_change"
                 break                       # 出口 2：改写无效
             if prev_bad is not None and len(bad) > len(prev_bad):
+                end_reason = "worse"
                 break                       # 出口 3：越改越差
 
             prev_bad = bad
             cur = revise(cur, verdicts_to_instruction(comp))
             cur_fp = critique_fingerprint(cur)
-        return Traj(turns)
+        return Traj(turns, end_reason)
 
     def seq_logp(text_prompt: str, completion: str, ref: bool = False) -> Tuple[torch.Tensor, int]:
         """返回 (completion 的逐 token logprob 均值, completion token 数)。
@@ -594,6 +604,9 @@ def main() -> int:
             accum = 0
 
         n_turns_total = sum(len(tr.turns) for tr in keep)
+        ends = {}
+        for tr in trajs:
+            ends[tr.end_reason] = ends.get(tr.end_reason, 0) + 1
         kept_details = [t.detail for tr in keep for t in tr.turns]
 
         avg_len = sum(comp_lens) / len(comp_lens)
@@ -608,6 +621,7 @@ def main() -> int:
             "comp_len": round(avg_len, 1),
             "n_kept": len(keep), "n_drop": n_drop,
             "turns": n_turns_total,
+            "end_reasons": ends,
             "n_items": [d["n_items"] for d in kept_details],
             "coverage": round(sum(d["coverage"] for d in kept_details) / len(kept_details), 3),
             "acc_pos": round(sum((d["acc_pos"] or 0) for d in kept_details) / len(kept_details), 3),
@@ -621,7 +635,8 @@ def main() -> int:
             print(f"[{step:>3}] loss={float(loss.detach()):+.4f} "
                   f"kl={float(kl.detach()):+.4f} r={mean_r:+.3f}±{std_r:.3f} "
                   f"通过类={rec['acc_pos']:.2f} 不过类={rec['acc_neg']:.2f} "
-                  f"len={avg_len:.0f} 轨迹={len(keep)}/{len(trajs)} 轮数={n_turns_total}")
+                  f"len={avg_len:.0f} 轨迹={len(keep)}/{len(trajs)} "
+                  f"轮数={n_turns_total} 结束={ends}")
 
         if step % 20 == 0:
             ckpt = out_dir / f"lora_step{step}"
