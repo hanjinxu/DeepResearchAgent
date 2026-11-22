@@ -36,8 +36,12 @@ git clone <你的仓库地址> deepresearch && cd deepresearch
 cp config.example.yml config.yml
 
 # 依赖
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-pip install vllm modelscope -i https://pypi.tuna.tsinghua.edu.cn/simple
+# 装依赖：直接用 AutoDL 自带的默认源（阿里云镜像），不要再加 -i 清华源
+pip install -r requirements.txt --no-cache-dir
+
+# vLLM 必须锁版本，否则会拉最新版并强制升级 torch，把镜像环境搞坏
+pip install "vllm==0.10.2" "torch==2.8.0" "transformers>=4.55.2,<5" --no-cache-dir
+pip install modelscope --no-cache-dir
 ```
 
 ---
