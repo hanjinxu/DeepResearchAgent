@@ -291,24 +291,42 @@ def main() -> int:
         return n >= MIN_TEACHER_ITEMS, n
 
     def reward_of(draft: str, fp: str, texts: Sequence[str]) -> Tuple[List[float], List[dict]]:
-        """奖励 = 与教师判定的一致率。
+        """奖励 = 分类别准确率的平均（balanced accuracy），再按覆盖率打折。
 
-        分母固定为「教师可判条数」，不是「模型自己判了几条」——
-        否则模型只输出 3 条且全对就能拿满分，直接学会少说话。
-        漏判 = 分子不涨、分母不变 = 自动受罚。
+        为什么不用普通一致率：
+            实测这份报告教师判 18 通过 / 2 不通过。模型只要全判"通过"
+            就能拿 18/20 = 0.90，比它认真判还高——直接训出"全判通过"。
+        为什么分类别：
+            通过类和不过类各算一个准确率再平均，两类的权重一样。
+            全判通过时"不过类"准确率为 0，总分封顶 0.5，占不到便宜。
+        为什么乘覆盖率：
+            模型只判 8 条、漏 12 条时，它能在判过的条目上全对。
+            按覆盖率（judged/teacher）线性打折，漏判越多得分越低。
         """
         labels = teacher_labels(draft, fp)
-        denom = max(len(labels), 1)
+        pos = [k for k, v in labels.items() if v]
+        neg = [k for k, v in labels.items() if not v]
 
         rewards, details = [], []
         for t in texts:
             judged = {v.check_id: v.passed for v in parse_checklist(t) if v.passed is not None}
-            agree = sum(1 for k, v in judged.items() if k in labels and labels[k] == v)
-            rewards.append(round(agree / denom, 4))
+
+            acc_pos = (sum(1 for k in pos if judged.get(k) is True) / len(pos)) if pos else None
+            acc_neg = (sum(1 for k in neg if judged.get(k) is False) / len(neg)) if neg else None
+            parts = [a for a in (acc_pos, acc_neg) if a is not None]
+            base = sum(parts) / len(parts) if parts else 0.0
+
+            coverage = len(judged) / max(len(labels), 1)
+            # 覆盖不到 80% 开始线性打折；判满则不打折
+            factor = min(1.0, coverage / 0.8)
+            rewards.append(round(base * factor, 4))
+
             details.append({
-                # 少于 5 条判定的样本不可训：模型基本没按格式输出，学它没意义
                 "trainable": len(judged) >= 5,
-                "n_items": len(judged), "n_agree": agree, "denom": denom,
+                "n_items": len(judged), "coverage": round(coverage, 3),
+                "acc_pos": None if acc_pos is None else round(acc_pos, 3),
+                "acc_neg": None if acc_neg is None else round(acc_neg, 3),
+                "base": round(base, 3),
             })
         return rewards, details
 
@@ -374,7 +392,7 @@ def main() -> int:
         # 否则：PASS 得 0 分，提 3 条错批评得 -2 分 → 优势指向"什么都不说"，
         # 模型会精确地学会沉默。这是整套奖励里最隐蔽的 reward hacking 入口：
         # 它不报错、不像 bug，只会让报告越来越"干净"而信息量越来越低。
-        keep = [(t, r) for t, r, d in zip(texts, rewards, details) if d["trainable"]]
+        keep = [(t, r, d) for t, r, d in zip(texts, rewards, details) if d["trainable"]]
         n_drop = len(texts) - len(keep)
 
         if len(keep) < 2:
@@ -389,8 +407,9 @@ def main() -> int:
                       f"丢弃 {n_drop} 条不可训）")
             continue
 
-        kept_texts = [t for t, _ in keep]
-        kept_rewards = [r for _, r in keep]
+        kept_texts = [t for t, _, _ in keep]
+        kept_rewards = [r for _, r, _ in keep]
+        kept_details = [d for _, _, d in keep]
         mean_r = sum(kept_rewards) / len(kept_rewards)
         std_r = (sum((r - mean_r) ** 2 for r in kept_rewards) / len(kept_rewards)) ** 0.5
         advs = normalize_advantages(kept_rewards)
@@ -441,9 +460,9 @@ def main() -> int:
         avg_len = sum(comp_lens) / len(comp_lens)
         adv_abs = sum(abs(a) for a in advs) / len(advs)
         rec = {
-            "step": step, "loss": round(float(loss), 5),
-            "policy_loss": round(float(policy_loss), 5),
-            "kl": round(float(kl), 5),
+            "step": step, "loss": round(float(loss.detach()), 5),
+            "policy_loss": round(float(policy_loss.detach()), 5),
+            "kl": round(float(kl.detach()), 5),
             "reward_mean": round(mean_r, 4), "reward_std": round(std_r, 4),
             "adv_abs_mean": round(adv_abs, 4),
             "rewards": [round(r, 4) for r in kept_rewards],
@@ -455,14 +474,22 @@ def main() -> int:
             fd.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
         if step % args.log_every == 0:
-            print(f"[{step:>3}] loss={float(loss):+.4f} kl={float(kl):+.4f} "
-                  f"r={mean_r:+.3f}±{std_r:.3f} adv={adv_abs:.3f} len={avg_len:.0f}"
-                  f" kept={len(kept_texts)}/{len(texts)}")
+            print(f"[{step:>3}] loss={float(loss.detach()):+.4f} "
+                  f"kl={float(kl.detach()):+.4f} r={mean_r:+.3f}±{std_r:.3f} "
+                  f"通过类={rec['acc_pos']:.2f} 不过类={rec['acc_neg']:.2f} "
+                  f"len={avg_len:.0f} kept={len(kept_texts)}/{len(texts)}")
 
         if step % 20 == 0:
             ckpt = out_dir / f"lora_step{step}"
             model.save_pretrained(ckpt)
             print(f"    ↳ 已存 {ckpt}")
+
+    if accum > 0:
+        # 不足一个 grad_accum 的残留梯度直接提交，否则最后几步白算
+        scaler.step(opt)
+        scaler.update()
+        opt.zero_grad(set_to_none=True)
+        print(f">>> 已提交最后 {accum} 步残留梯度")
 
     model.save_pretrained(out_dir / "lora_final")
     print(f"\n✅ 训练结束：{args.steps} 步（跳过 {skipped} 步）｜日志 {log_path}")
