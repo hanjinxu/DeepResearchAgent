@@ -145,7 +145,7 @@ def main() -> int:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from deep_research.flywheel import normalize_advantages
-    from deep_research.prompts import RED_TEAM_PROMPT
+    from deep_research.prompts import RED_TEAM_CONTENT_PROMPT
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -209,12 +209,16 @@ def main() -> int:
             )
 
     def build_prompt(draft: str) -> str:
-        brief_hint = "；".join(
-            ln.lstrip("#").strip() for ln in draft.splitlines()[:5] if ln.strip()
-        )[:300]
-        return RED_TEAM_PROMPT.format(
-            research_brief=brief_hint or "（无简报）",
+        """必须与 sample_critiques 用的 prompt 完全一致。
+
+        踩过的坑：这里原本还用旧的 RED_TEAM_PROMPT（让它自由找问题），
+        而采样脚本已经切到 20 条内容检查。模型收到"找问题"的指令后
+        直接输出 PASS，解析出 0 条判定 → 全部不可训。
+        报错信息只写"可训样本 0<2"，完全看不出是 prompt 不一致。
+        """
+        return RED_TEAM_CONTENT_PROMPT.format(
             draft_report=_truncate_middle(draft, args.max_prompt_chars),
+            checklist=build_content_checklist(),
         )
 
     @torch.no_grad()
@@ -239,8 +243,6 @@ def main() -> int:
     # 每步都调一次 API 既慢又费钱。按草稿指纹缓存后，2 份草稿只调 2 次。
     from deep_research.flywheel.parser import parse_checklist
     from deep_research.flywheel.rubric import build_content_checklist
-    from deep_research.prompts import RED_TEAM_CONTENT_PROMPT
-
     teacher_path = out_dir / "teacher_labels.json"
     teacher_cache: Dict[str, Dict[str, bool]] = {}
     if teacher_path.exists():
