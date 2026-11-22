@@ -66,6 +66,8 @@ def main() -> int:
                     help="不填则用 DR_LLM_TEMPERATURE；两者都没有就沿用 config（通常为 0，采不出多样性）")
     ap.add_argument("--brief", default=None, help="手动指定研究简报；不填则从草稿里抠")
     ap.add_argument("--out", default="data/flywheel/raw.jsonl")
+    ap.add_argument("--prompt", choices=("checklist", "critique"), default="checklist",
+                    help="checklist=按业务评分卡逐条核对（默认）；critique=旧版自由提批评")
     ap.add_argument("--dry-run", action="store_true", help="只打印 prompt 与参数，不调用模型")
     args = ap.parse_args()
 
@@ -87,15 +89,29 @@ def main() -> int:
     from langchain_core.messages import HumanMessage
 
     from deep_research.flywheel import critique_fingerprint, parse_critiques
+    from deep_research.flywheel.parser import parse_checklist
+    from deep_research.flywheel.rubric import build_checklist
     from deep_research.llm import get_chat_model
-    from deep_research.prompts import RED_TEAM_PROMPT
+    from deep_research.prompts import RED_TEAM_CHECKLIST_PROMPT, RED_TEAM_PROMPT
+
+    def build_prompt(draft: str, brief: str) -> str:
+        if args.prompt == "checklist":
+            return RED_TEAM_CHECKLIST_PROMPT.format(
+                draft_report=draft, checklist=build_checklist()
+            )
+        return RED_TEAM_PROMPT.format(research_brief=brief, draft_report=draft)
+
+    def count_items(raw: str) -> int:
+        if args.prompt == "checklist":
+            return len(parse_checklist(raw))
+        return len(parse_critiques(raw))
 
     print(f"草稿 {len(drafts)} 份 × k={args.k}｜温度 {effective_temp}｜输出 {args.out}")
 
     if args.dry_run:
         d0 = _read(drafts[0])
         brief = args.brief or _guess_brief(d0)
-        prompt = RED_TEAM_PROMPT.format(research_brief=brief, draft_report=d0)
+        prompt = build_prompt(d0, brief)
         print("-" * 60)
         print(f"[dry] 草稿：{drafts[0]}（{len(d0)} 字）")
         print(f"[dry] 简报（截断）：{brief[:120]}")
@@ -117,7 +133,7 @@ def main() -> int:
             draft = _read(draft_path)
             fp = critique_fingerprint(draft)
             brief = args.brief or _guess_brief(draft)
-            prompt = RED_TEAM_PROMPT.format(research_brief=brief, draft_report=draft)
+            prompt = build_prompt(draft, brief)
 
             for i in range(args.k):
                 # PASS 也算一条样本：它代表"红队认为没问题"，
@@ -137,7 +153,7 @@ def main() -> int:
                     "sample_idx": i,
                     "temperature": os.environ.get("DR_LLM_TEMPERATURE", ""),
                     "raw": raw,
-                    "n_critiques": len(parse_critiques(raw)),
+                    "n_critiques": count_items(raw),
                     "usage": usage,
                     "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 }

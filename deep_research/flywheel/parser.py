@@ -20,7 +20,12 @@ from __future__ import annotations
 import re
 from typing import List
 
-from deep_research.flywheel.schema import SUBITEM_RE, Critique, severity_of
+from deep_research.flywheel.schema import (
+    SUBITEM_RE,
+    CheckVerdict,
+    Critique,
+    severity_of,
+)
 
 TAG_POS = "【原文位置】"
 TAG_PROB = "【问题】"
@@ -123,6 +128,35 @@ def parse_critiques(text: str) -> List[Critique]:
             )
         )
 
+    return out
+
+
+_CHECKLINE_RE = re.compile(r"^\s*(?:[-*]\s*)?([A-E]\d{1,2})\s*[|:：]?\s*(✅|❌|⚠️)\s*(.*)$")
+_QUOTE_IN_LINE = re.compile(r"原句[：:]\s*[「\"“]([^」\"”]{2,})[」\"”]")
+
+
+def parse_checklist(raw: str) -> List[CheckVerdict]:
+    """解析「逐条核对」格式的输出：`A3 ❌ 原因 ｜ 原句：「…」`。
+
+    容错点：
+    - 允许行首有 - / * 列表符
+    - 允许 ID 与标记之间有 | : 等分隔符
+    - 允许全文只有部分条目（模型漏判时不报错，由调用方按缺失数判断）
+    """
+    out: List[CheckVerdict] = []
+    for ln in (raw or "").splitlines():
+        m = _CHECKLINE_RE.match(ln.strip())
+        if not m:
+            continue
+        cid, mark, rest = m.group(1), m.group(2), m.group(3).strip()
+        status = {"✅": "pass", "❌": "fail", "⚠️": "unknown"}[mark]
+        qm = _QUOTE_IN_LINE.search(rest)
+        out.append(CheckVerdict(
+            check_id=cid,
+            status=status,
+            reason=rest[:200],
+            quote=qm.group(1) if qm else "",
+        ))
     return out
 
 

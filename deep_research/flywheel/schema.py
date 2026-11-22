@@ -191,3 +191,33 @@ def critique_fingerprint(text: str) -> str:
     """
     norm = "".join((text or "").split())
     return stable_id("draft", norm, n=12)
+
+
+@dataclass
+class CheckVerdict:
+    """红队对评分卡某一条的判定（新版「逐条核对」任务的输出单元）。
+
+    与 Critique 的区别：Critique 是"自由发现的问题"，CheckVerdict 是"对指定检查项的判定"。
+    后者的好处是**可以被规则核对**——rubrics.py 跑一遍就知道红队判得对不对。
+    """
+
+    check_id: str
+    status: str                    # pass | fail | unknown
+    reason: str = ""
+    quote: str = ""                # 判 fail 时必须有的逐字引句
+
+    STATUSES = ("pass", "fail", "unknown")
+
+    def __post_init__(self) -> None:
+        if self.status not in self.STATUSES:
+            raise ValueError(f"未知状态: {self.status}")
+
+    @property
+    def passed(self) -> Optional[bool]:
+        return {"pass": True, "fail": False}.get(self.status)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "check_id": self.check_id, "status": self.status,
+            "passed": self.passed, "reason": self.reason, "quote": self.quote,
+        }

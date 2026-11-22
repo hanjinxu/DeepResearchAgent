@@ -172,6 +172,32 @@ def _cols(section: str) -> List[str]:
     return []
 
 
+def build_checklist() -> str:
+    """把 CHECKS 渲染成红队 prompt 里的检查表。
+
+    单一数据源：红队看到的就是这里生成的，改 CHECKS 等于同时改了 prompt 和校验器，
+    不会出现"prompt 说查 30 条、校验器只认 26 条"这种错位。
+
+    按小节聚合而不是按 CHECKS 顺序直接输出——CHECKS 里同一小节的条目不一定相邻
+    （B5 属 2.1 但排在 B3/B4 之后），直接输出会让红队看到 2.2→2.3→2.1 这种乱序。
+    """
+    groups: Dict[str, List[Check]] = {}
+    order: List[str] = []
+    for c in CHECKS:
+        key = c.section or "全局"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(c)
+
+    lines: List[str] = []
+    for key in order:
+        lines.append(f"\n### {key}")
+        for c in groups[key]:
+            lines.append(f"- {c.id} {c.desc}")
+    return "\n".join(lines).strip()
+
+
 def check_report(draft: str) -> List[CheckResult]:
     """跑完 28 条，返回每条结果（model 类返回 passed=None）。"""
     secs = split_sections(draft or "")
@@ -370,6 +396,48 @@ def summarize(results: Sequence[CheckResult]) -> Dict[str, object]:
         "pass_rate": round(len(passed) / len(rule), 3) if rule else 0.0,
         "failed_ids": [r.check_id for r in failed],
         "model_pending": [r.check_id for r in results if r.passed is None],
+    }
+
+
+def compare_verdicts(verdicts: Sequence, draft: str) -> Dict[str, object]:
+    """把红队的逐条判定与规则真值比对，算出可验证的准确率。
+
+    这是新版红队的**奖励信号**：只统计"规则能判"的 26 条，
+    红队在这 26 条上判对的比例就是 accuracy。
+    剩下的 4 条（核心争议、2.1/2.2 重叠、动作具体性、高风险对应动作）
+    规则判不了，不计入，避免用噪声污染奖励。
+
+    三方对账比单一分数有用：
+        agree     —— 红队判对
+        disagree  —— 红队判错（能直接看出它哪类问题看不准）
+        missing   —— 红队漏判（连条目都没写，说明没按格式输出）
+        extra     —— 红队编了不存在的条目（ID 不在检查表里）
+    """
+    truth = {r.check_id: r.passed for r in check_report(draft) if r.passed is not None}
+    by_id = {v.check_id: v for v in verdicts}
+
+    agree, disagree = [], []
+    for cid, t in truth.items():
+        v = by_id.get(cid)
+        if v is None or v.passed is None:
+            continue
+        (agree if v.passed == t else disagree).append(cid)
+
+    missing = [cid for cid in truth if cid not in by_id or by_id[cid].passed is None]
+    extra = [cid for cid in by_id if cid not in CHECK_MAP]
+    judged = len(agree) + len(disagree)
+
+    return {
+        "judged": judged,
+        "agree": len(agree),
+        "disagree": len(disagree),
+        "accuracy": round(len(agree) / judged, 3) if judged else 0.0,
+        "agree_ids": agree,
+        "disagree_ids": disagree,
+        "missing_ids": missing,
+        "extra_ids": extra,
+        "ground_truth_pass": sum(1 for t in truth.values() if t),
+        "ground_truth_total": len(truth),
     }
 
 
