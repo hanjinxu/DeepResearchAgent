@@ -114,6 +114,14 @@ def _build_openai_kwargs(
     if api_cfg.get("extra_body"):
         kwargs["extra_body"] = api_cfg["extra_body"]
 
+    # 自定义 HTTP 头（可选）。典型用途：某些环境里 httpx 的 brotli 解压器有 bug，
+    # 服务端返回 br 压缩响应时会在 decode 阶段抛
+    # "process() takes no keyword arguments"。
+    # 用 Accept-Encoding 把压缩算法限制在 gzip/deflate 即可绕开，不必改依赖。
+    headers = api_cfg.get("headers")
+    if isinstance(headers, dict) and headers:
+        kwargs["default_headers"] = {str(k): str(v) for k, v in headers.items()}
+
     return kwargs
 
 
