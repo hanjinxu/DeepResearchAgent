@@ -410,19 +410,40 @@ def main() -> int:
         return text
 
     def rollout_trajectory(draft: str, fp0: str) -> "Traj":
+        """跑一条轨迹：判 → 改 → 判，直到停止条件满足。
+
+        三个出口，都用代码判断，不依赖 supervisor：
+            1. 没有 ❌            —— 全部通过，改无可改
+            2. ❌ 与上一轮完全相同 —— 改写没起作用，再改也是白花 API
+            3. ❌ 变多            —— 改写把它改坏了，继续只会更差
+            4. 轮次上限           —— 兜底，防止单步时间失控
+
+        之前只有 1 和 4。加 2、3 是因为实测会出现在同一组 ❌ 上来回改的情况，
+        每次改写都是一次 API 调用，白花。
+        """
         turns = []
         cur, cur_fp = draft, fp0
+        prev_bad = None
         for ti in range(args.turns):
             pr = build_prompt(cur)
             comp = rollout(pr, n_total=1)[0]
             rs, ds = reward_of(cur, cur_fp, [comp])
             turns.append(Turn(pr, comp, rs[0], ds[0]))
+
             if ti == args.turns - 1:
                 break
-            issues = verdicts_to_instruction(comp)
-            if not issues:
-                break           # 全通过，早停：这条轨迹提前收敛
-            cur = revise(cur, issues)
+
+            bad = frozenset(v.check_id for v in parse_checklist(comp)
+                            if v.status == "fail")
+            if not bad:
+                break                       # 出口 1：全通过
+            if prev_bad is not None and bad == prev_bad:
+                break                       # 出口 2：改写无效
+            if prev_bad is not None and len(bad) > len(prev_bad):
+                break                       # 出口 3：越改越差
+
+            prev_bad = bad
+            cur = revise(cur, verdicts_to_instruction(comp))
             cur_fp = critique_fingerprint(cur)
         return Traj(turns)
 
