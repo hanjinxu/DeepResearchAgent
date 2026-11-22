@@ -113,6 +113,12 @@ def main() -> int:
     ap.add_argument("--grad-accum", type=int, default=2)
     ap.add_argument("--rollout-chunk", type=int, default=2,
                     help="一次 generate 多少条，OOM 就调小")
+    ap.add_argument("--turns", type=int, default=1,
+                    help="多轮：每轮判一次、写作改一次。1=单轮（原行为）")
+    ap.add_argument("--writer-role", default="writer",
+                    help="多轮里负责改写的角色（走 API 或本地）")
+    ap.add_argument("--revise-max-tokens", type=int, default=4000,
+                    help="改写输出的 token 上限")
     ap.add_argument("--teacher-role", default="evaluator",
                     help="给 20 条内容项出参考答案的教师角色（必须与 policy 不同源）")
     ap.add_argument("--no-teacher", action="store_true",
@@ -222,12 +228,13 @@ def main() -> int:
         )
 
     @torch.no_grad()
-    def rollout(prompt: str) -> List[str]:
+    def rollout(prompt: str, n_total: int = None) -> List[str]:
+        n_total = args.k if n_total is None else n_total
         enc = tok(to_chat(prompt), return_tensors="pt", truncation=True,
                   max_length=8192).to(model.device)
         outs: List[str] = []
-        for _ in range(0, args.k, args.rollout_chunk):
-            n = min(args.rollout_chunk, args.k - len(outs))
+        for _ in range(0, n_total, args.rollout_chunk):
+            n = min(args.rollout_chunk, n_total - len(outs))
             gen = model.generate(
                 **enc, do_sample=True, temperature=args.temperature, top_p=args.top_p,
                 num_return_sequences=n, max_new_tokens=args.max_new_tokens,
@@ -330,6 +337,83 @@ def main() -> int:
             })
         return rewards, details
 
+    # ---------- 多轮轨迹 ----------
+    # 产品链路是「红队判 → 写作改 → 红队再判」，单轮训练见不到改写后的分布。
+    # 多轮把这条链路搬进训练：每轮判一次、改一次，轨迹 reward 取各轮平均。
+    # GRPO 公式一个字不改，只是「组」的单位从「一次输出」变成「一条轨迹」。
+    #
+    # 刻意不做的事：不加轮次惩罚。
+    # 罚轮次 = 奖励"赶紧判通过让循环结束"，正是我们要避免的 reward hacking。
+    from deep_research.flywheel import critique_fingerprint
+    from deep_research.flywheel.rubric import CONTENT_MAP
+    from deep_research.prompts import REFINE_FROM_CHECKS_PROMPT
+
+    class Turn:
+        __slots__ = ("prompt", "completion", "reward", "detail")
+
+        def __init__(self, prompt, completion, reward, detail):
+            self.prompt, self.completion = prompt, completion
+            self.reward, self.detail = reward, detail
+
+    class Traj:
+        __slots__ = ("turns", "reward")
+
+        def __init__(self, turns):
+            self.turns = turns
+            self.reward = sum(t.reward for t in turns) / max(len(turns), 1)
+
+        @property
+        def usable(self):
+            return bool(self.turns) and all(t.detail["trainable"] for t in self.turns)
+
+    def verdicts_to_instruction(raw: str) -> str:
+        """把红队的 ❌ 项转成给写作的修改清单。全通过则返回空串（用于早停）。"""
+        bad = [v for v in parse_checklist(raw) if v.status == "fail"]
+        if not bad:
+            return ""
+        lines = []
+        for v in bad:
+            c = CONTENT_MAP.get(v.check_id)
+            desc = c.desc if c else v.check_id
+            q = f" ｜ 原句：「{v.quote}」" if v.quote else ""
+            lines.append(f"- {v.check_id} {desc}：{v.reason[:120]}{q}")
+        return "\n".join(lines)
+
+    writer_model = None
+    if args.turns > 1:
+        from deep_research.llm import get_chat_model as _gcm
+
+        writer_model = _gcm(args.writer_role)
+
+    def revise(cur_draft: str, issues: str) -> str:
+        prompt = REFINE_FROM_CHECKS_PROMPT.format(
+            draft_report=_truncate_middle(cur_draft, args.max_prompt_chars),
+            issues=issues,
+        )
+        from langchain_core.messages import HumanMessage as _HM
+
+        resp = writer_model.invoke([_HM(content=prompt)],
+                                   max_tokens=args.revise_max_tokens)
+        text = resp.content if isinstance(resp.content, str) else str(resp.content)
+        return text.strip()
+
+    def rollout_trajectory(draft: str, fp0: str) -> "Traj":
+        turns = []
+        cur, cur_fp = draft, fp0
+        for ti in range(args.turns):
+            pr = build_prompt(cur)
+            comp = rollout(pr, n_total=1)[0]
+            rs, ds = reward_of(cur, cur_fp, [comp])
+            turns.append(Turn(pr, comp, rs[0], ds[0]))
+            if ti == args.turns - 1:
+                break
+            issues = verdicts_to_instruction(comp)
+            if not issues:
+                break           # 全通过，早停：这条轨迹提前收敛
+            cur = revise(cur, issues)
+            cur_fp = critique_fingerprint(cur)
+        return Traj(turns)
+
     def seq_logp(text_prompt: str, completion: str, ref: bool = False) -> Tuple[torch.Tensor, int]:
         """返回 (completion 的逐 token logprob 均值, completion token 数)。
 
@@ -382,7 +466,6 @@ def main() -> int:
 
     for step in range(1, args.steps + 1):
         fp, draft = keys[(step - 1) % len(keys)]
-        prompt = build_prompt(draft)
 
         ok, n_label = draft_is_usable(fp, draft)
         if not ok:
@@ -396,40 +479,33 @@ def main() -> int:
                       f"低于 {MIN_TEACHER_ITEMS} 条门槛）")
             continue
 
-        model.eval()   # 采样时关掉 LoRA dropout，否则同一条 prompt 的差异里混进 dropout 噪声
-        texts = rollout(prompt)
-        # 生成阶段的 KV cache 很占显存，先还给 allocator，
-        # 否则紧接着算 logprob 时容易"明明该够却 OOM"
+        model.eval()
+        trajs = [rollout_trajectory(draft, fp) for _ in range(args.k)]
         torch.cuda.empty_cache()
-        if args.smoke:
-            print(f"--- 第一条生成（{len(texts[0])} 字）---")
-            print(texts[0][:400].replace("\n", " ⏎ "))
-            print("---")
-        rewards, details = reward_of(draft, fp, texts)
         model.train()
 
-        # ⚠️ 只用可训样本算优势，必须排除 trainable=False 的（PASS / 全被过滤）。
-        # 否则：PASS 得 0 分，提 3 条错批评得 -2 分 → 优势指向"什么都不说"，
-        # 模型会精确地学会沉默。这是整套奖励里最隐蔽的 reward hacking 入口：
-        # 它不报错、不像 bug，只会让报告越来越"干净"而信息量越来越低。
-        keep = [(t, r, d) for t, r, d in zip(texts, rewards, details) if d["trainable"]]
-        n_drop = len(texts) - len(keep)
+        if args.smoke and trajs:
+            t1 = trajs[0].turns[0]
+            print(f"--- 轨迹1 第1轮（{len(t1.completion)} 字，"
+                  f"轨迹共 {len(trajs[0].turns)} 轮，reward={trajs[0].reward:.3f}）---")
+            print(t1.completion[:360].replace("\n", " ⏎ "))
+            print("---")
+
+        keep = [tr for tr in trajs if tr.usable]
+        n_drop = len(trajs) - len(keep)
 
         if len(keep) < 2:
             skipped += 1
             rec = {"step": step, "skipped": "too_few_trainable",
                    "n_kept": len(keep), "n_drop": n_drop,
-                   "rewards": [round(r, 4) for r in rewards]}
+                   "rewards": [round(tr.reward, 4) for tr in trajs]}
             with log_path.open("a", encoding="utf-8") as fd:
                 fd.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if step % args.log_every == 0:
-                print(f"[{step:>3}] 跳过（可训样本 {len(keep)}<2，"
-                      f"丢弃 {n_drop} 条不可训）")
+                print(f"[{step:>3}] 跳过（可训轨迹 {len(keep)}<2，丢弃 {n_drop} 条）")
             continue
 
-        kept_texts = [t for t, _, _ in keep]
-        kept_rewards = [r for _, r, _ in keep]
-        kept_details = [d for _, _, d in keep]
+        kept_rewards = [tr.reward for tr in keep]
         mean_r = sum(kept_rewards) / len(kept_rewards)
         std_r = (sum((r - mean_r) ** 2 for r in kept_rewards) / len(kept_rewards)) ** 0.5
         advs = normalize_advantages(kept_rewards)
@@ -438,44 +514,54 @@ def main() -> int:
             skipped += 1
             rec = {"step": step, "skipped": "zero_variance",
                    "reward_mean": round(mean_r, 4), "reward_std": round(std_r, 4),
-                   "n_drop": n_drop, "rewards": [round(r, 4) for r in kept_rewards]}
+                   "n_drop": n_drop,
+                   "rewards": [round(r, 4) for r in kept_rewards]}
             with log_path.open("a", encoding="utf-8") as fd:
                 fd.write(json.dumps(rec, ensure_ascii=False) + "\n")
             if step % args.log_every == 0:
-                print(f"[{step:>3}] 跳过（组内无方差）reward={mean_r:.3f} "
-                      f"rewards={[round(r,2) for r in kept_rewards]}")
+                print(f"[{step:>3}] 跳过（轨迹间无方差）reward={mean_r:.3f} "
+                      f"rewards={[round(r, 2) for r in kept_rewards]}")
             continue
 
-        # 逐条算 logprob（不批量：序列长度差异大，桶排序收益不值得这层复杂度）
-        loss_terms = []
-        kl_terms = []
-        comp_lens = []
-        for text, adv in zip(kept_texts, advs):
-            lp_pi, n = seq_logp(prompt, text, ref=False)
-            if n == 0:
-                continue
-            with torch.no_grad():
-                lp_ref, _ = seq_logp(prompt, text, ref=True)
-            loss_terms.append(-adv * lp_pi)
-            kl_terms.append(lp_pi - lp_ref)
-            comp_lens.append(n)
+        # 逐轮 backward：一条轨迹有 T 轮，如果先攒着再 backward，
+        # 就要同时持有 k×T 张计算图（k=4,T=3 就是 12 份激活），40G 卡放不下。
+        # 每轮 backward 一次，梯度天然累加，显存只留一份图。
+        turn_losses, turn_kls, comp_lens = [], [], []
+        n_bwd = 0
+        for tr, adv in zip(keep, advs):
+            T = max(len(tr.turns), 1)
+            for turn in tr.turns:
+                lp_pi, n = seq_logp(turn.prompt, turn.completion, ref=False)
+                if n == 0:
+                    continue
+                with torch.no_grad():
+                    lp_ref, _ = seq_logp(turn.prompt, turn.completion, ref=True)
+                lt = -adv * lp_pi / T
+                kt = (lp_pi - lp_ref) / T
+                scaler.scale((lt + args.kl_coef * kt) / args.grad_accum).backward()
+                turn_losses.append(float(lt.detach()))
+                turn_kls.append(float(kt.detach()))
+                comp_lens.append(n)
+                n_bwd += 1
+                del lp_pi, lp_ref, lt, kt
 
-        if not loss_terms:
+        if n_bwd == 0:
             skipped += 1
             continue
 
-        policy_loss = torch.stack(loss_terms).mean()
-        kl = torch.stack(kl_terms).mean()
+        policy_loss = torch.tensor(sum(turn_losses) / len(turn_losses))
+        kl = torch.tensor(sum(turn_kls) / len(turn_kls))
         loss = policy_loss + args.kl_coef * kl
 
-        # 真正的梯度累积：每 grad_accum 步才更新一次
-        scaler.scale(loss / args.grad_accum).backward()
         accum += 1
         if accum >= args.grad_accum:
             scaler.step(opt)
             scaler.update()
             opt.zero_grad(set_to_none=True)
             accum = 0
+
+        n_turns_total = sum(len(tr.turns) for tr in keep)
+        kept_details = [t.detail for tr in keep for t in tr.turns]
 
         avg_len = sum(comp_lens) / len(comp_lens)
         adv_abs = sum(abs(a) for a in advs) / len(advs)
@@ -487,7 +573,8 @@ def main() -> int:
             "adv_abs_mean": round(adv_abs, 4),
             "rewards": [round(r, 4) for r in kept_rewards],
             "comp_len": round(avg_len, 1),
-            "n_kept": len(kept_texts), "n_drop": n_drop,
+            "n_kept": len(keep), "n_drop": n_drop,
+            "turns": n_turns_total,
             "n_items": [d["n_items"] for d in kept_details],
             "coverage": round(sum(d["coverage"] for d in kept_details) / len(kept_details), 3),
             "acc_pos": round(sum((d["acc_pos"] or 0) for d in kept_details) / len(kept_details), 3),
@@ -501,7 +588,7 @@ def main() -> int:
             print(f"[{step:>3}] loss={float(loss.detach()):+.4f} "
                   f"kl={float(kl.detach()):+.4f} r={mean_r:+.3f}±{std_r:.3f} "
                   f"通过类={rec['acc_pos']:.2f} 不过类={rec['acc_neg']:.2f} "
-                  f"len={avg_len:.0f} kept={len(kept_texts)}/{len(texts)}")
+                  f"len={avg_len:.0f} 轨迹={len(keep)}/{len(trajs)} 轮数={n_turns_total}")
 
         if step % 20 == 0:
             ckpt = out_dir / f"lora_step{step}"
