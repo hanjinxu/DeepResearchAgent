@@ -66,8 +66,9 @@ def main() -> int:
                     help="不填则用 DR_LLM_TEMPERATURE；两者都没有就沿用 config（通常为 0，采不出多样性）")
     ap.add_argument("--brief", default=None, help="手动指定研究简报；不填则从草稿里抠")
     ap.add_argument("--out", default="data/flywheel/raw.jsonl")
-    ap.add_argument("--prompt", choices=("checklist", "critique"), default="checklist",
-                    help="checklist=按业务评分卡逐条核对（默认）；critique=旧版自由提批评")
+    ap.add_argument("--prompt", choices=("content", "checklist", "critique"), default="content",
+                    help="content=只判 7 条内容问题（默认，训练用）；"
+                         "checklist=30 条全判；critique=旧版自由提批评")
     ap.add_argument("--dry-run", action="store_true", help="只打印 prompt 与参数，不调用模型")
     args = ap.parse_args()
 
@@ -90,11 +91,19 @@ def main() -> int:
 
     from deep_research.flywheel import critique_fingerprint, parse_critiques
     from deep_research.flywheel.parser import parse_checklist
-    from deep_research.flywheel.rubric import build_checklist
+    from deep_research.flywheel.rubric import build_checklist, build_content_checklist
     from deep_research.llm import get_chat_model
-    from deep_research.prompts import RED_TEAM_CHECKLIST_PROMPT, RED_TEAM_PROMPT
+    from deep_research.prompts import (
+        RED_TEAM_CHECKLIST_PROMPT,
+        RED_TEAM_CONTENT_PROMPT,
+        RED_TEAM_PROMPT,
+    )
 
     def build_prompt(draft: str, brief: str) -> str:
+        if args.prompt == "content":
+            return RED_TEAM_CONTENT_PROMPT.format(
+                draft_report=draft, checklist=build_content_checklist()
+            )
         if args.prompt == "checklist":
             return RED_TEAM_CHECKLIST_PROMPT.format(
                 draft_report=draft, checklist=build_checklist()
@@ -102,7 +111,7 @@ def main() -> int:
         return RED_TEAM_PROMPT.format(research_brief=brief, draft_report=draft)
 
     def count_items(raw: str) -> int:
-        if args.prompt == "checklist":
+        if args.prompt in ("content", "checklist"):
             return len(parse_checklist(raw))
         return len(parse_critiques(raw))
 

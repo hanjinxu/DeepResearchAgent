@@ -131,7 +131,7 @@ def parse_critiques(text: str) -> List[Critique]:
     return out
 
 
-_CHECKLINE_RE = re.compile(r"^\s*(?:[-*]\s*)?([A-E]\d{1,2})\s*[|:：]?\s*(✅|❌|⚠️)\s*(.*)$")
+_CHECKLINE_RE = re.compile(r"^\s*(?:[-*]\s*)?([A-G]\d{1,2})\s*[|:：]?\s*(✅|❌|⚠️)\s*(.*)$")
 _QUOTE_IN_LINE = re.compile(r"原句[：:]\s*[「\"“]([^」\"”]{2,})[」\"”]")
 
 
